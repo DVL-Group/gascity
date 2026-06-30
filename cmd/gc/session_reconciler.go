@@ -3536,7 +3536,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if trace != nil {
 					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(idleRespawnDrainReason), TraceOutcomeDrain, target.tp.TemplateName, name, nil)
 				}
-			} else if !idleAssignedWorkOnly(eval) {
+			} else {
 				// Stamp currently_processing_bead_id so the next divergence
 				// check has a baseline. Backfills legacy sessions that were
 				// already alive before this metadata existed and refreshes the
@@ -3544,10 +3544,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 					tick.apply(target.info.ID, fold)
 				}
-				// Session is correctly awake. Cancel any non-drift drain
-				// (handles scale-back-up: agent returns to desired set while draining).
-				// Assigned-work-only sessions are intentionally skipped here so
-				// their idle probe can run to completion (sleep-and-respawn).
+				// Session is correctly awake. Cancel any cancelable drain
+				// (handles scale-back-up: agent returns to desired set while
+				// draining). cancelSessionDrainInfo skips idle-respawn drains
+				// (non-cancelable) so pool sessions mid idle-respawn-drain are
+				// unaffected. Named and non-interactive sessions reach this
+				// branch because beginIdleRespawnDrainIfIdle returns false for
+				// them — their stale cancelable drains must be cleared when
+				// assigned work re-appears.
 				cancelSessionDrainInfo(info, sp, dt)
 				clearCompletedIdleProbe(target.info.ID, dt)
 				if info.SleepIntent == "idle-stop-pending" {
