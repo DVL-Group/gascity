@@ -64,18 +64,26 @@ type hookClaimOps struct {
 	// AND gc.active_work_bead (the claimed work bead's gc.step_id) — in ONE update, so
 	// the (run, step) tuple stays atomically consistent. Best-effort.
 	RecordSessionPointers hookRecordSessionPointersFunc
-	Now                   func() time.Time
+	// EnqueueContinuationNudge enqueues a hook-claim-continuation nudge for the
+	// claiming session when a pool graph.v2 workflow root was freshly claimed and
+	// has at least one pre-assigned sibling step. This propels the root → step-1
+	// transition without requiring an external gc session nudge. Best-effort.
+	// ACP-transport sessions require daemon.nudge_dispatcher = "supervisor" for
+	// delivery; the legacy per-session poller cannot deliver to ACP sessions.
+	EnqueueContinuationNudge hookEnqueueContinuationNudgeFunc
+	Now                      func() time.Time
 }
 
 type (
-	hookClaimFunc                 func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
-	hookListContinuationFunc      func(context.Context, string, []string, string, string) ([]beads.Bead, error)
-	hookAssignContinuationFunc    func(context.Context, string, []string, string, string) error
-	hookDrainAckFunc              func(io.Writer) error
-	hookEmitClaimRejectedFunc     func(beadID, existingClaimant, attemptedClaimant string)
-	hookResolveWorkBranchFunc     func(dir string) string
-	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
-	hookRecordSessionPointersFunc func(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error
+	hookClaimFunc                    func(context.Context, string, []string, string, string) (beads.Bead, bool, error)
+	hookListContinuationFunc         func(context.Context, string, []string, string, string) ([]beads.Bead, error)
+	hookAssignContinuationFunc       func(context.Context, string, []string, string, string) error
+	hookDrainAckFunc                 func(io.Writer) error
+	hookEmitClaimRejectedFunc        func(beadID, existingClaimant, attemptedClaimant string)
+	hookResolveWorkBranchFunc        func(dir string) string
+	hookStampWorkMetaFunc            func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
+	hookRecordSessionPointersFunc    func(ctx context.Context, dir string, env []string, assignee, sessionBeadID, runID, stepID string) error
+	hookEnqueueContinuationNudgeFunc func(assignee string)
 )
 
 type hookClaimJSONResult struct {
@@ -198,6 +206,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.RecordSessionPointers == nil {
 		ops.RecordSessionPointers = hookRecordSessionPointersWithBdStore
+	}
+	if ops.EnqueueContinuationNudge == nil {
+		ops.EnqueueContinuationNudge = hookContinuationNudgeEnqueue
 	}
 }
 
@@ -333,6 +344,9 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		return 1
 	}
 	result.ContinuationAssigned = assigned
+	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+		ops.EnqueueContinuationNudge(opts.Assignee)
+	}
 	if opts.JSON {
 		if err := writeCLIJSONLine(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
@@ -1146,6 +1160,31 @@ func hookEmitClaimRejected(beadID, existingClaimant, attemptedClaimant string) {
 	if closer, ok := rec.(io.Closer); ok {
 		_ = closer.Close()
 	}
+}
+
+// hookContinuationNudgeEnqueue is the production EnqueueContinuationNudge
+// implementation. It enqueues a queued nudge for the claiming session so the
+// pool agent re-enters its hook after claiming the workflow root and propels
+// the root → step-1 transition without an external gc session nudge. The city
+// path is resolved from the environment so this call is self-contained — the
+// same pattern as hookEmitClaimRejected / openCityRecorder. Best-effort: any
+// error is swallowed so a nudge-queue failure never blocks the claim.
+// ACP sessions: maybeStartNudgePoller is a no-op for acp transport; configure
+// daemon.nudge_dispatcher = "supervisor" for delivery to ACP pool sessions.
+func hookContinuationNudgeEnqueue(assignee string) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return
+	}
+	item := newQueuedNudgeWithOptions(assignee, "Work slung. Check your hook.", "hook-claim-continuation", time.Now(), queuedNudgeOptions{})
+	if err := enqueueQueuedNudgeWithStore(cityPath, beads.NudgesStore{}, item); err != nil {
+		return
+	}
+	maybeStartNudgePoller(nudgeTarget{
+		cityPath:    cityPath,
+		sessionName: assignee,
+	})
+	_ = pokeController(cityPath)
 }
 
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {
