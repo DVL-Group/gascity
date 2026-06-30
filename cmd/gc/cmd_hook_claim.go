@@ -1170,20 +1170,36 @@ func hookEmitClaimRejected(beadID, existingClaimant, attemptedClaimant string) {
 // same pattern as hookEmitClaimRejected / openCityRecorder. Best-effort: any
 // error is swallowed so a nudge-queue failure never blocks the claim.
 // ACP sessions: maybeStartNudgePoller is a no-op for acp transport; configure
-// daemon.nudge_dispatcher = "supervisor" for delivery to ACP pool sessions.
+// daemon.nudge_dispatcher = "supervisor" for reliable queued delivery.
+// See writeHookClaimWorkResultForBead for the call site.
 func hookContinuationNudgeEnqueue(assignee string) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return
 	}
-	item := newQueuedNudgeWithOptions(assignee, "Work slung. Check your hook.", "hook-claim-continuation", time.Now(), queuedNudgeOptions{})
-	if err := enqueueQueuedNudgeWithStore(cityPath, beads.NudgesStore{}, item); err != nil {
-		return
-	}
-	maybeStartNudgePoller(nudgeTarget{
+	// Load cfg so maybeStartNudgePoller can skip the sidecar when the city
+	// uses daemon.nudge_dispatcher = "supervisor". A nil cfg (load error)
+	// falls through to legacy mode with no behavior change.
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	target := nudgeTarget{
 		cityPath:    cityPath,
 		sessionName: assignee,
-	})
+		cfg:         cfg,
+	}
+	// Apply a session fence so a stale nudge from a prior run of this slot
+	// is rejected at delivery if the slot is recycled before the nudge fires.
+	// Best-effort: if the store is unavailable the nudge enqueues without a
+	// fence (same behavior as before this fix).
+	store := openNudgeBeadStore(cityPath)
+	if store.Store != nil {
+		defer closeBeadStoreHandle(store.Store) //nolint:errcheck
+		target = withNudgeTargetFence(store.Store, target)
+	}
+	item := newQueuedNudgeWithOptions(assignee, "Work slung. Check your hook.", "hook-claim-continuation", time.Now(), queuedNudgeOptionsFromTarget(target))
+	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
+		return
+	}
+	maybeStartNudgePoller(target)
 	_ = pokeController(cityPath)
 }
 
