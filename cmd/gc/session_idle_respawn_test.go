@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -175,5 +177,79 @@ func TestBeginIdleRespawnDrainIfIdle_SkipsNonInteractive(t *testing.T) {
 	dt.finishIdleProbe(info.ID, probe, true, clk.Now().Add(-time.Second))
 	if beginIdleRespawnDrainIfIdle(info, eval, dt, sp, clk) {
 		t.Fatal("a non-interactive assigned-work session must not be idle-respawn-drained")
+	}
+}
+
+// A named session that is idleAssignedWorkOnly (assigned-work sole wake reason)
+// and has an active cancelable drain must have that drain canceled when the
+// reconciler processes it — even though beginIdleRespawnDrainIfIdle returns
+// false for named sessions. Before the fix, the else-if !idleAssignedWorkOnly
+// guard left this branch unreachable for such sessions.
+func TestReconciler_CancelsDrainForNamedIdleAssignedWorkOnlySession(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	sessionName := "named-worker-1"
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{Command: "cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Status: "in_progress",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":                  sessionName,
+			"template":                      "named-worker",
+			"generation":                    "1",
+			session.NamedSessionMetadataKey: "true",
+			"state":                         "active",
+			"last_woke_at":                  clk.Now().UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	// Work bead assigned to the session bead.
+	workBead := beads.Bead{
+		ID:       "work-1",
+		Status:   "in_progress",
+		Assignee: sessionBead.ID,
+	}
+
+	// Pre-seed a cancelable "idle" drain for the session.
+	dt := newDrainTracker()
+	info := sessiontest.SeedBead(t, sessionBead)
+	beginSessionDrainInfo(info, sp, dt, "idle", clk, defaultDrainTimeout)
+	if dt.get(sessionBead.ID) == nil {
+		t.Fatal("pre-condition: expected an idle drain to be seeded")
+	}
+
+	reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{sessionBead},
+		nil, // desiredState — session is NOT configured; assigned-work is sole reason
+		nil, // configuredNames
+		&config.City{},
+		sp,
+		store,
+		nil,                    // dops
+		[]beads.Bead{workBead}, // assignedWorkBeads → gives "assigned-work" wake reason
+		nil,                    // readyWaitSet
+		dt,
+		nil,   // poolDesired
+		false, // storeQueryPartial
+		nil,   // workSet
+		"",    // cityName
+		nil,   // idleTracker
+		clk,
+		events.Discard,
+		0, 0,
+		io.Discard, io.Discard,
+	)
+
+	if ds := dt.get(sessionBead.ID); ds != nil {
+		t.Fatalf("expected idle drain to be canceled for named idleAssignedWorkOnly session, got %+v", ds)
 	}
 }

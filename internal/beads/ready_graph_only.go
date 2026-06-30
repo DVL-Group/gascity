@@ -8,6 +8,10 @@ package beads
 // backlog. In the identity phase (no distinct ClassGraph backend) an
 // implementation MUST fall back to the full Ready so default cities stay
 // byte-identical.
+//
+// No production store currently implements this interface — the Router-side
+// implementer (graph_store=sqlite backend) is pending a follow-up change.
+// GraphOnlyReadyFor returns (nil, false) in all real cities today.
 type GraphOnlyReadyStore interface {
 	ReadyGraphOnly(query ...ReadyQuery) ([]Bead, error)
 }
