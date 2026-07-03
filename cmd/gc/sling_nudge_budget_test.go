@@ -201,7 +201,7 @@ func TestSlingNudgeEnqueueBudgetPreservesQueuedItems(t *testing.T) {
 
 // TestSlingNudgeEnqueueEmptyBacklogFast pins that an empty queue still
 // enqueues near-instantly: none of the three maintenance loops iterate, so
-// the deadline check never fires regardless of nudgeEnqueueMaintenanceBudget.
+// the deadline check never fires regardless of nudgeForegroundMaintenanceBudget.
 func TestSlingNudgeEnqueueEmptyBacklogFast(t *testing.T) {
 	cityPath := t.TempDir()
 	store := &budgetSlowNudgeStore{latency: 40 * time.Millisecond, failAfter: 4}

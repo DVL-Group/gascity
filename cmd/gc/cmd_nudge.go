@@ -40,15 +40,18 @@ const (
 	defaultQueuedNudgeMaxAttempts   = 5
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
 
-	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
-	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
-	// maintenance (expiring/pruning stale entries) while holding the
-	// withNudgeQueueState flock. Without this, maintenance does O(backlog)
-	// serial store writes with no cap, so a large backlog turns a sub-second
-	// foreground call into a multi-minute hang. Items skipped once the budget
-	// is exceeded are left untouched for the next enqueue, the per-session
-	// poller, or the doctor reaper to handle — never dropped.
-	nudgeEnqueueMaintenanceBudget = 2 * time.Second
+	// nudgeForegroundMaintenanceBudget bounds the wall-clock time the
+	// latency-sensitive foreground nudge-queue paths — `gc sling --nudge`
+	// enqueue and `gc nudge drain` (the UserPromptSubmit hook) — spend on
+	// best-effort nudge-queue maintenance (expiring/pruning stale entries)
+	// while holding the withNudgeQueueState flock. Without this, maintenance
+	// does O(backlog) serial store writes with no cap, so a large backlog
+	// turns a sub-second foreground call into a multi-minute hang (or, for
+	// the hook, a stall up to its own external timeout). Items skipped once
+	// the budget is exceeded are left untouched for the next enqueue/drain
+	// pass, the per-session poller, or the doctor reaper to handle — never
+	// dropped.
+	nudgeForegroundMaintenanceBudget = 2 * time.Second
 
 	defaultNudgePollInterval   = 2 * time.Second
 	defaultNudgePollQuiescence = 3 * time.Second
@@ -454,7 +457,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 
 	now := time.Now()
-	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, now)
+	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, now, now.Add(nudgeForegroundMaintenanceBudget))
 	if err != nil {
 		if inject {
 			return 0
@@ -1297,7 +1300,7 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if !pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return false, nil
 	}
-	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now())
+	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, time.Now(), noMaintenanceDeadline())
 	if err != nil || len(items) == 0 {
 		return false, err
 	}
@@ -1804,19 +1807,18 @@ func nudgeQueueHasWork(state *nudgeQueueState) bool {
 	return len(state.Pending) > 0 || len(state.InFlight) > 0 || len(state.Dead) > 0
 }
 
-func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
-	return claimDueQueuedNudgesMatching(cityPath, now, func(item queuedNudge) bool {
+func claimDueQueuedNudgesForTarget(cityPath string, target nudgeTarget, now, deadline time.Time) ([]queuedNudge, error) {
+	return claimDueQueuedNudgesMatching(cityPath, now, deadline, func(item queuedNudge) bool {
 		return queuedNudgeClaimableForTarget(target, item)
 	})
 }
 
-func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
+func claimDueQueuedNudgesMatching(cityPath string, now, deadline time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
 	maint := nudgeMaintenanceStore{cityPath: cityPath}
 	defer maint.close() //nolint:errcheck // best-effort
 	var claimed []queuedNudge
 	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		front := maint.frontForState(state)
-		deadline := noMaintenanceDeadline()
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}
@@ -1997,7 +1999,7 @@ func enqueueQueuedNudgeWithStore(cityPath string, store beads.NudgesStore, item 
 	}
 	err = withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
 		now := time.Now()
-		deadline := now.Add(nudgeEnqueueMaintenanceBudget)
+		deadline := now.Add(nudgeForegroundMaintenanceBudget)
 		if err := recoverExpiredInFlightNudges(state, front, now, deadline); err != nil {
 			return err
 		}

@@ -27,7 +27,7 @@ import (
 func intPtrNudge(n int) *int { return &n }
 
 func claimDueWorkerNudges(cityPath string) ([]queuedNudge, error) {
-	return claimDueQueuedNudgesMatching(cityPath, time.Now(), func(item queuedNudge) bool {
+	return claimDueQueuedNudgesMatching(cityPath, time.Now(), noMaintenanceDeadline(), func(item queuedNudge) bool {
 		return item.Agent == "worker"
 	})
 }
@@ -3305,7 +3305,7 @@ func TestClaimDueQueuedNudgesForTargetLeavesSiblingFencePending(t *testing.T) {
 		sessionID:         "gc-1",
 		continuationEpoch: "1",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now(), noMaintenanceDeadline())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -3344,7 +3344,7 @@ func TestClaimDueQueuedNudgesForTargetClaimsHistoricalAlias(t *testing.T) {
 		aliasHistory: []string{"mayor"},
 		sessionID:    "gc-1",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now(), noMaintenanceDeadline())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -3371,7 +3371,7 @@ func TestClaimDueQueuedNudgesForTargetClaimsSameSessionStaleEpoch(t *testing.T) 
 		sessionID:         "gc-1",
 		continuationEpoch: "2",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now(), noMaintenanceDeadline())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -4380,7 +4380,7 @@ func TestEnqueueSupersedes_InFlightNudge(t *testing.T) {
 	if err := enqueueQueuedNudge(dir, first); err != nil {
 		t.Fatalf("enqueueQueuedNudge(first): %v", err)
 	}
-	claimed, err := claimDueQueuedNudgesMatching(dir, now.Add(time.Millisecond), func(item queuedNudge) bool {
+	claimed, err := claimDueQueuedNudgesMatching(dir, now.Add(time.Millisecond), noMaintenanceDeadline(), func(item queuedNudge) bool {
 		return item.ID == "n-inflight"
 	})
 	if err != nil {
@@ -4737,7 +4737,7 @@ func TestNudgePollHelpersCloseEveryStoreTheyOpen(t *testing.T) {
 
 	// Drive the unconditional per-tick helpers a few times, as a poll loop would.
 	for i := 0; i < 3; i++ {
-		if _, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return false }); err != nil {
+		if _, err := claimDueQueuedNudgesMatching(dir, now, noMaintenanceDeadline(), func(queuedNudge) bool { return false }); err != nil {
 			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
 		}
 		if _, _, _, err := listQueuedNudges(dir, "worker", now); err != nil {
