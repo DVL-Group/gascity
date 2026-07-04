@@ -150,7 +150,7 @@ func TestClaimDueQueuedNudgesMatchingKeepsPollerMaintenanceUnbounded(t *testing.
 	// Poller/dispatcher maintenance is intentionally unbounded: unlike
 	// foreground status reads, non-foreground callers own convergence and must
 	// drain the whole expired backlog they choose to inspect.
-	claimed, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return false })
+	claimed, err := claimDueQueuedNudgesMatching(dir, now, noMaintenanceDeadline(), func(queuedNudge) bool { return false })
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
 	}
