@@ -107,7 +107,12 @@ func installStatusListingBudgetStore(t *testing.T, backing beads.Store) *statusL
 
 func TestNudgeStatusListingMaintenanceBudgetPreservesStatusAndSkippedBacklog(t *testing.T) {
 	const deadBacklog = 180
-	now := time.Date(2026, 7, 3, 18, 0, 0, 0, time.UTC)
+	// Seed against the real wall clock: the maintenance budget is enforced in
+	// the prune/recover loops against time.Now(), so a fixed past/future now
+	// would make the deadline already-expired (zero budget) or unreachable
+	// (unbounded) and the partial-maintenance assertions below would pass
+	// vacuously. Mirrors TestNudgeDrainClaimBoundedByBacklog.
+	now := time.Now().UTC()
 	cases := []struct {
 		name string
 		list func(string, nudgeTarget, time.Time) ([]queuedNudge, []queuedNudge, []queuedNudge, error)
@@ -142,7 +147,11 @@ func TestNudgeStatusListingMaintenanceBudgetPreservesStatusAndSkippedBacklog(t *
 			if got := queuedNudgeIDs(dead); len(got) != 1 || got[0] != "nudge-status-dead" {
 				t.Fatalf("dead IDs = %v, want [nudge-status-dead]", got)
 			}
-			if ops := atomic.LoadInt64(&slow.ops); ops >= deadBacklog {
+			ops := atomic.LoadInt64(&slow.ops)
+			if ops == 0 {
+				t.Fatalf("status maintenance performed no store ops; want partial progress within the budget (a zero-progress deadline — the logical-now/wall-clock mismatch — is the regression this guards)")
+			}
+			if ops >= deadBacklog {
 				t.Fatalf("status maintenance store ops = %d, want fewer than dead backlog %d to prove the deadline cut in", ops, deadBacklog)
 			}
 
