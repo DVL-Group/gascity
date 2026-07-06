@@ -83,6 +83,70 @@ func TestJSONSchemaManifestForHookClaim(t *testing.T) {
 	}
 }
 
+func TestJSONSchemasDeclaredForCommandsWithJSONOutput(t *testing.T) {
+	clearGCEnv(t)
+
+	var stdout, stderr bytes.Buffer
+	root := newRootCmd(&stdout, &stderr)
+	commands := commandsDeclaringJSONOutput(root)
+	if len(commands) == 0 {
+		t.Fatal("no commands with JSON output discovered")
+	}
+
+	for _, cmd := range commands {
+		commandPath := commandPathWords(cmd)
+		name := strings.Join(commandPath, " ")
+		t.Run(strings.ReplaceAll(name, " ", "_"), func(t *testing.T) {
+			for _, role := range []string{jsonSchemaResultRole, jsonSchemaFailureRole} {
+				schema, err := schemaForRole(cmd, commandPath, role)
+				if err != nil {
+					t.Fatalf("%s schema for %q: %v", role, name, err)
+				}
+				if !json.Valid(schema) {
+					t.Fatalf("%s schema for %q is not valid JSON: %s", role, name, schema)
+				}
+			}
+		})
+	}
+}
+
+func commandsDeclaringJSONOutput(root *cobra.Command) []*cobra.Command {
+	var commands []*cobra.Command
+	walkCommandTree(root, func(cmd *cobra.Command) {
+		if cmd == root {
+			return
+		}
+		if !commandDeclaresJSONOutput(cmd) {
+			return
+		}
+		commands = append(commands, cmd)
+	})
+	slices.SortFunc(commands, func(a, b *cobra.Command) int {
+		return strings.Compare(strings.Join(commandPathWords(a), " "), strings.Join(commandPathWords(b), " "))
+	})
+	return commands
+}
+
+func commandDeclaresJSONOutput(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if strings.TrimSpace(cmd.Annotations[jsonSchemaDirAnnotation]) != "" {
+		return true
+	}
+	return cmd.LocalFlags().Lookup("json") != nil
+}
+
+func walkCommandTree(cmd *cobra.Command, visit func(*cobra.Command)) {
+	if cmd == nil {
+		return
+	}
+	visit(cmd)
+	for _, child := range cmd.Commands() {
+		walkCommandTree(child, visit)
+	}
+}
+
 func TestJSONResultSchemasRequireSuccessDiscriminator(t *testing.T) {
 	var missing []string
 	var nonObject []string
