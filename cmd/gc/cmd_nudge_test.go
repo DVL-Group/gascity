@@ -4778,7 +4778,7 @@ func TestNudgePollHelpersSkipDoltOpenOnEmptyQueue(t *testing.T) {
 	// No enqueue: the state.json queue is empty (the idle-session steady state).
 	const ticks = 5
 	for i := 0; i < ticks; i++ {
-		if _, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return true }); err != nil {
+		if _, err := claimDueQueuedNudgesMatching(dir, now, noMaintenanceDeadline(), func(queuedNudge) bool { return true }); err != nil {
 			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
 		}
 		if _, _, _, err := listQueuedNudges(dir, "worker", now); err != nil {
@@ -4831,7 +4831,7 @@ func TestNudgePollHelpersOpenOnceWhenQueueHasWork(t *testing.T) {
 	}
 
 	assertOneOpenOneClose(t, "claim", func(dir string) {
-		if _, err := claimDueQueuedNudgesMatching(dir, now, func(queuedNudge) bool { return false }); err != nil {
+		if _, err := claimDueQueuedNudgesMatching(dir, now, noMaintenanceDeadline(), func(queuedNudge) bool { return false }); err != nil {
 			t.Fatalf("claimDueQueuedNudgesMatching: %v", err)
 		}
 	})
