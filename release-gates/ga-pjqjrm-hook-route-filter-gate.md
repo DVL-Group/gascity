@@ -1,114 +1,75 @@
 # Release Gate: ga-pjqjrm hook route filter
 
-Bead: `ga-pjqjrm` - needs-deploy: gc hook display route-filter via hookClaimMatchesRoute
+Gate run: 2026-07-16T09:51:24Z
+
+Deploy bead: `ga-fsizxp`
+
+PR: https://github.com/gastownhall/gascity/pull/3952
 
 Branch: `release/ga-pjqjrm-hook-route-filter`
 
-Reviewed commit: `c6aad5e8f3634bec3305d828f8ab6afea21e7794` (rebased equivalent: `684872d3366df3458ad86387a5c794c25b4bad3b`)
+Head: `83a5f603ca1e8cbebb2cd2e9d5fceb77ffac2544`
 
-Base: `origin/main` at `d9225156f9b30fa4fe7fee28c30699ee2cc8cc3d` (rebased onto `9b6d91e1755ab968a66c7b30a53be9a626c17c9b`, rebase gate: 2026-07-13)
+Base: `origin/main` at `d1b7c04262e44a4eaef160feafb6c74675991022`
 
-Reviewer bead: `ga-hksfp1`
-
-Project manifest note: `docs/PROJECT_MANIFEST.md` is not present in this checkout (`rg --files -g '*PROJECT_MANIFEST*'` returned no manifest). Gate criteria below use the active deployer prompt criteria and `TESTING.md` sharded-runner guidance.
+Project manifest note: `docs/PROJECT_MANIFEST.md` and `PROJECT_MANIFEST.md`
+are not present in this checkout. This gate uses the active deployer release
+criteria and the repository testing guidance in `TESTING.md`.
 
 ## Summary
 
-This is a single-bead deploy for the `gc hook` display route-filter change. The branch is one feature commit on top of `origin/main`. It changes one subsystem: hook display visibility and the config/API/schema support for the `work_query_unfiltered` opt-out.
+This is a single-bead deploy for PR #3952, which routes plain `gc hook`
+display output through the same claim route filtering predicates already used
+by `gc hook --claim`.
+
+The branch also carries the supporting `work_query_unfiltered` config opt-out,
+config patch/override/migration wiring, generated schemas and OpenAPI/client
+artifacts, and the resource-census baseline update required by the new tests.
 
 ## Criteria
 
 | # | Criterion | Verdict | Evidence |
 |---|-----------|---------|----------|
-| 1 | Review PASS present | PASS | Reviewer bead `ga-hksfp1` is closed with close reason `pass` and notes contain `Review verdict: PASS (gascity/reviewer)`. |
-| 2 | Acceptance criteria met | PASS | The reviewed diff implements the ratified `ga-2rpi53` Option A predicate: keep display candidates assigned to the current identity or matching `hookClaimMatchesRoute`, with `WorkQueryUnfiltered` as the explicit opt-out. The diff includes hook display tests, config field-sync coverage, migration coverage, and regenerated schema/API artifacts. |
-| 3 | Tests pass | PASS | Rebase re-verification (2026-07-13): first `TMPDIR=/var/tmp/gp make test-fast-parallel` post-rebase hit 5 failures (`TestCityRuntimeReloadDrainBoundedByTimeout`, `TestCmdStopForceDelegatesImmediateControllerStop`, `TestCmdStopForceEscalatesInProgressControllerStop`, `TestCmdStopMarginExhaustion`, `TestHandleExtMsgInboundDefaultRouteMatchesMixedCaseProvider`) — all timeout/tmpdir-cleanup/wall-clock-margin signatures consistent with 6-way parallel shard contention, and none in files this PR changes. Isolated re-runs with no parallel contention confirmed pre-existing flakiness, not a regression: the three `TestCmdStop*` tests passed 9/9 across 3 runs each, `TestHandleExtMsgInboundDefaultRouteMatchesMixedCaseProvider` passed 5/5, `TestCityRuntimeReloadDrainBoundedByTimeout` passed 2/3 (itself a load-sensitive wall-clock bound). The pre-push hook's own fresh full-suite dry-run (triggered by the force-push below) then passed all 8 fast jobs cleanly. `go vet ./...` clean. `make dashboard-check` PASS. `make check-schema` and `make spec-ci` both clean (no artifact drift). See Test Details below. |
-| 4 | No high-severity review findings open | PASS | Reviewer notes state "No blocking findings. Routing to deployer." No unresolved HIGH findings were recorded in the deploy or review bead notes. |
-| 5 | Final branch is clean | PASS | `git status --short --branch` reports no uncommitted changes after rebase (only pre-existing untracked worktree-shared `.claude/skills/` entries, unrelated to this branch). Force-pushed rebased branch to `origin release/ga-pjqjrm-hook-route-filter`. |
-| 6 | Branch diverges cleanly from main | PASS | After rebase onto `origin/main` at `9b6d91e1755ab968a66c7b30a53be9a626c17c9b`, `git merge-base --is-ancestor origin/main HEAD` passes. `gh pr view 3952` reports `mergeable: MERGEABLE` (no content conflict). `mergeStateStatus: BLOCKED` at push time reflects CI checks freshly kicked off by the force-push and no native GitHub review recorded (review is tracked via bead `ga-hksfp1`, not a native GH approval) — not a content-conflict block. |
-| 7 | Single feature theme | PASS | `git cherry -v origin/main HEAD` shows exactly 2 commits unique to the branch: the feature commit `684872d3366df3458ad86387a5c794c25b4bad3b` (rebased equivalent of reviewed `c6aad5e8f`) and this gate doc's own PASS commit `0bb71e62b`. Diff-stat against `origin/main` touches exactly the same 19 files as the "Changed Files Reviewed For Scope" list below, plus this gate doc. No independent feature theme is bundled. |
+| 1 | Review PASS present | PASS | Reviewer bead `ga-cfys3t` is closed with close reason `pass`; notes contain `Review verdict: PASS (gascity/reviewer)` and `No blocking findings.` |
+| 2 | Acceptance criteria met | PASS | The diff adds `filterHookCandidatesByRoute` / `hookCandidateVisibleForDisplay` and applies it to the no-`--claim` hook display path. It preserves assigned-to-self visibility, keeps unrouted candidates for the active run target visible, and adds `work_query_unfiltered` as the opt-out for intentionally broad custom work queries. Tests and config/schema/migration wiring cover those surfaces. |
+| 3 | Tests pass | PASS | Local: `make test-fast-parallel` passed all 8 fast jobs; `go vet ./...` clean; `make dashboard-check` passed; targeted `go test ./cmd/gc ./internal/config ./internal/migrate -run 'TestCmdHookDisplayFiltersByRoute|TestCmdHookDisplayRouteFilterOptOutWithWorkQueryUnfiltered|TestAgentFieldSync|TestApplyAgentPatchCoversAllFields|TestApplyAgentOverrideCoversAllFields|TestAgentCloneIsDeep|TestMigrate' -count=1` passed. GitHub status check rollup for PR #3952 at this head has required checks passing. |
+| 4 | No high-severity review findings open | PASS | Reviewer notes explicitly state no blocking findings. No unresolved HIGH finding is recorded in `ga-fsizxp` or `ga-cfys3t`. |
+| 5 | Final branch is clean | PASS | Scratch worktree was clean before writing this gate; this gate file is the only deployer change and is committed as the release-gate PASS commit. `git status` is rechecked clean before push. |
+| 6 | Branch diverges cleanly from main | PASS | After refresh, `git merge-base origin/main HEAD` is `d1b7c04262e44a4eaef160feafb6c74675991022`; `git rev-list --left-right --count origin/main...HEAD` reports `0 5`; `git merge-tree --write-tree origin/main HEAD` succeeds with tree `3c114209e7e146868ed14a7cc7278e8e846e25d9`. `gh pr view 3952` reports `mergeable=MERGEABLE`, `mergeStateStatus=CLEAN`, head OID `83a5f603ca1e8cbebb2cd2e9d5fceb77ffac2544`. |
+| 7 | Single feature theme | PASS | `git diff --name-only origin/main..HEAD` is confined to the hook display route-filter feature and required support: `cmd/gc` hook tests/logic, config patch/override/migration/pool copy wiring, generated schema/OpenAPI/dashboard client files, resource-census/test guidance updates, and this gate file. No independent subsystem or user-facing feature is bundled. |
 
 ## Acceptance Checks
 
-- `gc hook` display now route-filters the no-`--claim` path through the same identity and route predicates used by claim logic.
-- Assigned-to-self work remains visible even when `gc.routed_to` does not match the current route, preserving Tier-1 crash recovery behavior.
-- Unrouted workflow-root candidates for the current run target remain visible.
-- `work_query_unfiltered` opts out intentionally cross-cutting custom work queries without changing `--claim`.
-- `config.Agent`, `AgentPatch`, `AgentOverride`, apply functions, pool deep copy, migration structs, OpenAPI, generated client, and reference schemas were updated together.
+- Plain `gc hook <agent>` display uses the same identity and route predicates
+  as the claim path.
+- Assigned-to-self work remains visible for crash-recovery pickup.
+- Unrouted workflow-root candidates for the active run target remain visible.
+- `work_query_unfiltered` keeps intentionally broad custom work queries
+  available without weakening `--claim` enforcement.
+- `config.Agent`, `AgentPatch`, `AgentOverride`, patch/override application,
+  pool deep-copy, migration types, OpenAPI, generated clients, and reference
+  schemas were updated together.
 
-## Test Details
-
-- `TMPDIR=/var/tmp/gp make test-fast-parallel`: PASS, all fast jobs passed.
-- `TMPDIR=/var/tmp/gascity-deploy-ga-pjqjrm-tmp go vet ./...`: PASS.
-- `TMPDIR=/var/tmp/gascity-deploy-ga-pjqjrm-tmp make dashboard-check`: PASS.
-- Dashboard preview smoke: PASS, Vite preview served the built app at `http://127.0.0.1:4792/`.
-- Initial `TMPDIR=/var/tmp/gascity-deploy-ga-pjqjrm-tmp make test-fast-parallel` attempt: FAIL due to generated Unix socket paths under the long temp prefix returning `bind: invalid argument`. Re-run with the short temp root above passed.
-
-### Rebase re-verification (2026-07-13)
-
-- `TMPDIR=/var/tmp/gp make test-fast-parallel` (first run post-rebase): 5 failures (`TestCityRuntimeReloadDrainBoundedByTimeout`, `TestCmdStopForceDelegatesImmediateControllerStop`, `TestCmdStopForceEscalatesInProgressControllerStop`, `TestCmdStopMarginExhaustion`, `TestHandleExtMsgInboundDefaultRouteMatchesMixedCaseProvider`), all in subsystems unrelated to this PR's changed files.
-- Isolated re-runs (no parallel shard contention): `go test ./cmd/gc/... -run 'TestCityRuntimeReloadDrainBoundedByTimeout|TestCmdStopForceDelegatesImmediateControllerStop|TestCmdStopForceEscalatesInProgressControllerStop|TestCmdStopMarginExhaustion' -count=3` — the three `TestCmdStop*` tests passed 9/9; `TestCityRuntimeReloadDrainBoundedByTimeout` passed 2/3 (a wall-clock margin check that is itself load-sensitive). `go test ./internal/api/... -run TestHandleExtMsgInboundDefaultRouteMatchesMixedCaseProvider -count=5` passed 5/5. Conclusion: pre-existing environmental flakes from 6-way parallel resource contention, not regressions from this rebase.
-- `go vet ./...`: PASS.
-- `TMPDIR=/var/tmp/gp make dashboard-check`: PASS (frontend build, typecheck, typecheck:test, and `go test ./internal/api/dashboardspa/... ./internal/api/dashboardbff/...` all passed).
-- `make check-schema`: PASS, no drift.
-- `make spec-ci`: PASS, no drift in OpenAPI/client artifacts.
-- Pre-push hook's own fresh full-suite dry-run (triggered by the force-push): all 8 fast jobs passed cleanly, including the tests that had failed above.
-
-## Changed Files Reviewed For Scope
+## Test Evidence
 
 ```text
-cmd/gc/cmd_hook.go
-cmd/gc/cmd_hook_test.go
-cmd/gc/pool.go
-cmd/gc/pool_test.go
-docs/reference/config.md
-docs/reference/schema/city-schema.json
-docs/reference/schema/city-schema.txt
-docs/reference/schema/openapi.json
-docs/reference/schema/openapi.txt
-docs/reference/schema/pack-schema.json
-docs/reference/schema/pack-schema.txt
-internal/api/genclient/client_gen.go
-internal/api/openapi.json
-internal/config/config.go
-internal/config/field_sync_test.go
-internal/config/pack.go
-internal/config/patch.go
-internal/migrate/migrate.go
-internal/migrate/migrate_test.go
+HOME=/home/jaword TMPDIR=/var/tmp/gp make test-fast-parallel
+All fast jobs passed
+
+HOME=/home/jaword TMPDIR=/var/tmp/gp go vet ./...
+PASS
+
+HOME=/home/jaword TMPDIR=/var/tmp/gp make dashboard-check
+PASS
+
+HOME=/home/jaword TMPDIR=/var/tmp/gp go test ./cmd/gc ./internal/config ./internal/migrate \
+  -run 'TestCmdHookDisplayFiltersByRoute|TestCmdHookDisplayRouteFilterOptOutWithWorkQueryUnfiltered|TestAgentFieldSync|TestApplyAgentPatchCoversAllFields|TestApplyAgentOverrideCoversAllFields|TestAgentCloneIsDeep|TestMigrate' \
+  -count=1
+PASS
 ```
-
-## Rebase resolution (2026-07-13)
-
-Builder rebased `release/ga-pjqjrm-hook-route-filter` onto `origin/main` at
-`9b6d91e1755ab968a66c7b30a53be9a626c17c9b` (148 commits ahead of the prior
-base) after the PR went stale and reported CONFLICTING for 7 days.
-
-One conflict, in `internal/config/pack.go`: main had refactored the
-field-by-field `applyAgentOverride`/`applyAgentPatchFields` pattern into a
-single shared `applyAgentMutation(a, p, sleepSource)` body fed by a new
-`toAgentPatch()` adapter that converts `AgentOverride` into `AgentPatch`,
-while this branch's reviewed commit still targeted the pre-refactor
-field-by-field style to add the `WorkQueryUnfiltered` override. Resolved by
-keeping main's refactored structure and threading this branch's one new
-field through the adapter: added `WorkQueryUnfiltered: ov.WorkQueryUnfiltered,`
-to the `toAgentPatch()` struct literal, matching `AgentPatch`'s field order.
-Verified correct against `internal/config/patch.go`, which auto-merged
-cleanly and already handles `WorkQueryUnfiltered` inside
-`applyAgentMutation` — confirming the adapter now wires the override path
-end-to-end. `internal/config/config.go`'s `AgentOverride.WorkQueryUnfiltered`
-and `Agent.WorkQueryUnfiltered` struct fields also auto-merged cleanly with
-no manual resolution needed.
-
-Post-rebase re-verification is recorded in criteria 3, 5, 6, 7 above and in
-the Rebase re-verification test details above. Force-pushed the rebased
-branch to `origin release/ga-pjqjrm-hook-route-filter`; `gh pr view 3952`
-now reports `mergeable: MERGEABLE`.
 
 ## Decision
 
-PASS. All 7 criteria hold on the rebased branch. PR #3952 is clean against
-current `origin/main` with no content conflicts. Route merge-request to
-mayor/mpr.
-
-Gate result: PASS (re-confirmed after rebase, 2026-07-13).
+PASS. All seven release criteria hold for PR #3952 at
+`83a5f603ca1e8cbebb2cd2e9d5fceb77ffac2544`. Route merge-request to mayor/mpr;
+the deployer does not merge.
