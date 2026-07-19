@@ -513,6 +513,10 @@ source = ".gc/system/packs/gastown"
 
 func TestImportStateDoctorCheckReportsMissingLockfile(t *testing.T) {
 	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
 	writePackToml(t, cityDir, `[pack]
 name = "demo"
@@ -540,6 +544,54 @@ version = "^1.0"
 
 func TestBuildDoctorChecksSkipsImportStateCheckWhenCityConfigInvalid(t *testing.T) {
 	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeCityToml(t, cityDir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, cityDir, `[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.0"
+`)
+
+	prevCityFlag := cityFlag
+	prevCityDoltCheck := newDoctorDoltServerCheck
+	prevRigDoltCheck := newDoctorRigDoltServerCheck
+	t.Cleanup(func() {
+		cityFlag = prevCityFlag
+		newDoctorDoltServerCheck = prevCityDoltCheck
+		newDoctorRigDoltServerCheck = prevRigDoltCheck
+	})
+	cityFlag = cityDir
+	newDoctorDoltServerCheck = func(cityPath string, _ bool) *doctor.DoltServerCheck {
+		return doctor.NewDoltServerCheck(cityPath, true)
+	}
+	newDoctorRigDoltServerCheck = func(cityPath string, rig config.Rig, _ bool) *doctor.RigDoltServerCheck {
+		return doctor.NewRigDoltServerCheck(cityPath, rig, true)
+	}
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, true, false, false, 0, &stdout, &stderr)
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "packv2-import-state") || !strings.Contains(out, "missing-lockfile") {
+		t.Fatalf("doctor output missing import-state failure for broken install state:\n%s", out)
+	}
+	if !strings.Contains(out, `gc import install`) {
+		t.Fatalf("doctor output missing install hint:\n%s", out)
+	}
+}
+
+func TestDoDoctorSkipsImportStateCheckWhenCityConfigInvalid(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	cleanupManagedDoltTestCity(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace\nname = \"demo\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
