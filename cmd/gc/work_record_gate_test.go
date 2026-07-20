@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -187,6 +189,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	beadsList := []beads.Bead{
 		{ID: "wr-shipped-nocommit", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
 		{ID: "wr-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp}},
+		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-control", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
 	}
@@ -206,6 +209,20 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
 		{"missing outcome blocks when enforced", []string{"close", "wr-missing"}, true, true, "missing " + beadmeta.WorkOutcomeMetadataKey},
 		{"update --status=closed is gated", []string{"update", "wr-shipped-nocommit", "--status=closed"}, true, true, "close of wr-shipped-nocommit"},
+		{
+			"atomic update validates submitted metadata",
+			[]string{"update", "wr-atomic-noop", "--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeNoOp, "--status=closed"},
+			true,
+			false,
+			"",
+		},
+		{
+			"metadata-like flag value is not submitted metadata",
+			[]string{"update", "wr-missing", "--notes", "--set-metadata=" + beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeNoOp, "--status=closed"},
+			true,
+			true,
+			"missing " + beadmeta.WorkOutcomeMetadataKey,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -225,6 +242,43 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 				t.Fatalf("gate output %q does not contain %q", out, tc.wantWarn)
 			}
 		})
+	}
+}
+
+func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	artifactPath := filepath.Join(repoDir, "artifact.txt")
+	if err := os.WriteFile(artifactPath, []byte("integrated\n"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	runGit(t, repoDir, "add", "artifact.txt")
+	runGit(t, repoDir, "commit", "-m", "test: integrate artifact")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "wr-atomic-shipped",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: repoDir,
+		},
+	}}, nil)
+	args := []string{
+		"update", "wr-atomic-shipped",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
+		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=main",
+		"--status=closed",
+	}
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(args, store, repoDir, true, &stderr); block {
+		t.Fatalf("valid atomic shipped close blocked; stderr=%s", stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("valid atomic shipped close warned: %q", got)
 	}
 }
 

@@ -191,6 +191,7 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot s
 		if getErr != nil || !isWorkRecordGatedBead(bead) {
 			continue
 		}
+		bead = applyWorkRecordUpdateMetadata(bead, bdArgs)
 		repoDir := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
 		if repoDir == "" {
 			repoDir = scopeRoot
@@ -206,4 +207,47 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot s
 		}
 	}
 	return block
+}
+
+// applyWorkRecordUpdateMetadata overlays metadata mutations from an atomic
+// `bd update ... --status=closed` invocation onto the stored bead before the
+// close gate validates it. The documented worker close form stamps the typed
+// work record and closes in one update, so validating only the pre-update bead
+// would reject a valid enforced close and warn incorrectly in migration mode.
+func applyWorkRecordUpdateMetadata(bead beads.Bead, bdArgs []string) beads.Bead {
+	if len(bdArgs) == 0 || bdArgs[0] != "update" {
+		return bead
+	}
+	metadata := make(map[string]string, len(bead.Metadata))
+	for key, value := range bead.Metadata {
+		metadata[key] = value
+	}
+	bead.Metadata = metadata
+	valueFlags := bdSubcmdValueFlags("update")
+
+	for i := 1; i < len(bdArgs); i++ {
+		arg := bdArgs[i]
+		switch {
+		case arg == "--set-metadata" && i+1 < len(bdArgs):
+			i++
+			if key, value, ok := strings.Cut(bdArgs[i], "="); ok && key != "" {
+				bead.Metadata[key] = value
+			}
+		case strings.HasPrefix(arg, "--set-metadata="):
+			if key, value, ok := strings.Cut(strings.TrimPrefix(arg, "--set-metadata="), "="); ok && key != "" {
+				bead.Metadata[key] = value
+			}
+		case arg == "--unset-metadata" && i+1 < len(bdArgs):
+			i++
+			delete(bead.Metadata, bdArgs[i])
+		case strings.HasPrefix(arg, "--unset-metadata="):
+			delete(bead.Metadata, strings.TrimPrefix(arg, "--unset-metadata="))
+		case !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(bdArgs):
+			// A value may itself look like a metadata flag. Consume every known
+			// update flag's separate value so only real flag positions mutate
+			// the prospective work record.
+			i++
+		}
+	}
+	return bead
 }
