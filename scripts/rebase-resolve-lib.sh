@@ -51,7 +51,7 @@
 # whole file is declared a REAL conflict and resolution fails — the caller
 # aborts the rebase and routes to the builder.
 #
-# Required external commands: git, awk, cmp, mktemp.
+# Required external commands: git, awk, cmp, mktemp, tr.
 
 # shellcheck source=./push-ownership-guard.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/push-ownership-guard.sh"
@@ -66,9 +66,11 @@
 is_additive_keepboth_path() {
     local path="$1"
     # Normalize to lowercase for matching; keep original for extension checks.
-    local lower="${path,,}"
+    local lower
+    lower="$(printf '%s' "$path" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
     local base="${path##*/}"
-    local lbase="${base,,}"
+    local lbase
+    lbase="$(printf '%s' "$base" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
 
     # --- documentation ---
     case "$lbase" in
