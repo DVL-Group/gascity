@@ -4657,6 +4657,32 @@ func TestPurgeSpoolConvergesWhenMalformedNestingExceedsDirectoryBudget(t *testin
 	}
 }
 
+const deepSpoolFixtureDepth = 192
+
+func deepSpoolFixturePath(base string) string {
+	for range deepSpoolFixtureDepth {
+		base = filepath.Join(base, "d")
+	}
+	return base
+}
+
+func TestDeepSpoolFixtureGeometryFitsMacOSPathBudget(t *testing.T) {
+	if deepSpoolFixtureDepth <= 128 {
+		t.Fatalf("deep fixture depth = %d, must exceed the low-NOFILE limit", deepSpoolFixtureDepth)
+	}
+	if uint64(deepSpoolFixtureDepth) <= spoolMinimumDirectoryProgress {
+		t.Fatalf("deep fixture depth = %d, must exceed the minimum directory-progress batch %d", deepSpoolFixtureDepth, spoolMinimumDirectoryProgress)
+	}
+
+	// Leave a deliberately generous 384-byte allowance for the macOS temp-root
+	// prefix and the product-metrics tree above the repeated fixture segments.
+	const macOSPathLimit = 1024
+	deepest := filepath.Join(deepSpoolFixturePath(strings.Repeat("x", 384)), "outside-link")
+	if len(deepest) >= macOSPathLimit {
+		t.Fatalf("deep fixture path uses %d bytes, must stay below macOS PATH_MAX %d", len(deepest), macOSPathLimit)
+	}
+}
+
 func TestPurgeQuarantineCollisionChainMakesBoundedMonotonicProgress(t *testing.T) {
 	for _, kind := range []string{"leaf", "empty-directory", "lax-empty-directory", "deep-directory", "lax-deep-directory", "directory-chain"} {
 		t.Run(kind, func(t *testing.T) {
@@ -5617,12 +5643,9 @@ func newQuarantineCollisionFixture(t *testing.T, kind string) *quarantineCollisi
 		t.Fatal(err)
 	}
 	if kind == "deep-directory" || kind == "lax-deep-directory" {
-		path := blockerPath
-		for depth := 0; depth < 513; depth++ {
-			path = filepath.Join(path, fmt.Sprintf("d%03d", depth))
-			if err := os.Mkdir(path, 0o700); err != nil {
-				t.Fatal(err)
-			}
+		path := deepSpoolFixturePath(blockerPath)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(path, "payload"), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
@@ -8064,11 +8087,9 @@ func TestSpoolDeepPurgeConvergesUnderLowFileDescriptorLimit(t *testing.T) {
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for depth := 0; depth < 300; depth++ {
-		deep = filepath.Join(deep, fmt.Sprintf("d%03d", depth))
-		if err := os.Mkdir(deep, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	deep = deepSpoolFixturePath(deep)
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(deep, "payload"), []byte("deep"), 0o600); err != nil {
 		t.Fatal(err)
