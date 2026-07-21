@@ -9,7 +9,24 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shirou/gopsutil/v4/load"
 )
+
+func TestCurrentSystemHealthLoadSamplerOutlivesRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	called := false
+	_, _ = currentSystemHealthWithLoadSampler(ctx, func() (*load.AvgStat, error) {
+		called = true
+		return &load.AvgStat{}, nil
+	})
+
+	if !called {
+		t.Fatal("context-independent load sampler was not called after request cancellation")
+	}
+}
 
 func TestHealthSystemReturnsUnavailableWhenSamplingFails(t *testing.T) {
 	p := New(Deps{})

@@ -109,6 +109,16 @@ func (p *Plane) registerHealth() {
 // cross-platform OS samplers. A failed or impossible essential metric fails the
 // snapshot so callers report it as unavailable instead of fabricating zeroes.
 func currentSystemHealth(ctx context.Context) (systemHealth, error) {
+	// On Windows, the first gopsutil Avg call starts a process-global sampler
+	// under the supplied context. A request context would stop that singleton
+	// permanently when the request ends, so always give it process lifetime.
+	return currentSystemHealthWithLoadSampler(ctx, load.Avg)
+}
+
+func currentSystemHealthWithLoadSampler(
+	ctx context.Context,
+	loadAverage func() (*load.AvgStat, error),
+) (systemHealth, error) {
 	var runtimeMem runtime.MemStats
 	runtime.ReadMemStats(&runtimeMem)
 	pid := os.Getpid()
@@ -121,7 +131,7 @@ func currentSystemHealth(ctx context.Context) (systemHealth, error) {
 		return systemHealth{}, fmt.Errorf("reading host CPU count: invalid value %d", cpuCount)
 	}
 
-	avg, err := load.AvgWithContext(ctx)
+	avg, err := loadAverage()
 	if err != nil {
 		return systemHealth{}, fmt.Errorf("reading host load average: %w", err)
 	}
