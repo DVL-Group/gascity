@@ -1138,6 +1138,65 @@ describe('supervisor client wrapper', () => {
     });
   });
 
+  it('keeps an in-flight bead-list fetch pending until the caller aborts it', async () => {
+    const controller = new AbortController();
+    const abortReason = new DOMException('obsolete attention read', 'AbortError');
+    let observedSignal: AbortSignal | undefined;
+    let resolveFetch: ((response: Response) => void) | undefined;
+    let notifyStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const fetchSpy = vi.fn(
+      (input: RequestInfo | URL) =>
+        new Promise<Response>((resolve, reject) => {
+          const request = input instanceof Request ? input : new Request(input);
+          observedSignal = request.signal;
+          resolveFetch = resolve;
+          const rejectOnAbort = () => reject(request.signal.reason);
+          if (request.signal.aborted) {
+            rejectOnAbort();
+          } else {
+            request.signal.addEventListener('abort', rejectOnAbort, { once: true });
+          }
+          notifyStarted?.();
+        }),
+    );
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    const pending = api.listBeads('captured-city', undefined, controller.signal);
+    let settled = false;
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await started;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    controller.abort(abortReason);
+    const callerAbortReachedFetch = observedSignal?.aborted === true;
+    if (!callerAbortReachedFetch) {
+      resolveFetch?.(
+        new Response(JSON.stringify({ items: [], total: 0 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    }
+    await pending.catch(() => undefined);
+
+    expect(callerAbortReachedFetch).toBe(true);
+    expect(settled).toBe(true);
+  });
+
   it('accepts supervisor responses whose shapes exceed the OpenAPI snapshot (r43k)', async () => {
     // Regression for r43k: the dashboard must not re-validate and reject the
     // supervisor's own valid output. Here `last_activity` is not an RFC3339

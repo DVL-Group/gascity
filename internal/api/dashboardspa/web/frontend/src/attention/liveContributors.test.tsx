@@ -301,15 +301,27 @@ describe('useLiveAttentionContributors', () => {
     expect(mockSupervisorApi.listAgents).toHaveBeenCalledWith('test-city');
     expect(mockSupervisorApi.listSessions).toHaveBeenCalledWith('test-city');
     expect(mockSupervisorApi.sessionPending).toHaveBeenCalledWith('test-city', 'gc-2568');
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledWith('test-city', { limit: 1000 });
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledWith('test-city', {
-      label: 'needs/stephanie',
-      status: 'open',
-    });
-    expect(mockSupervisorApi.listBeads).toHaveBeenCalledWith('test-city', {
-      label: 'gc:escalation',
-      status: 'open',
-    });
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledWith(
+      'test-city',
+      { limit: 1000 },
+      expect.any(AbortSignal),
+    );
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledWith(
+      'test-city',
+      {
+        label: 'needs/stephanie',
+        status: 'open',
+      },
+      expect.any(AbortSignal),
+    );
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledWith(
+      'test-city',
+      {
+        label: 'gc:escalation',
+        status: 'open',
+      },
+      expect.any(AbortSignal),
+    );
     expect(mockSupervisorApi.listEvents).toHaveBeenCalledWith('test-city', {
       limit: 100,
       since: '24h',
@@ -409,6 +421,37 @@ describe('useLiveAttentionContributors', () => {
       escalationsError: 'supervisor unavailable',
     });
     expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(3);
+  });
+
+  it('propagates cancellation to every in-flight bead-attention read', async () => {
+    const controller = new AbortController();
+    const fallbackResolvers: Array<(value: { total: number; items: never[] }) => void> = [];
+    const seenSignals: Array<AbortSignal | undefined> = [];
+    mockSupervisorApi.listBeads.mockImplementation(
+      (_city: string, _query: unknown, signal?: AbortSignal) =>
+        new Promise((resolve, reject) => {
+          seenSignals.push(signal);
+          fallbackResolvers.push(resolve);
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+
+    const pending = fetchBeadsAttention(
+      'captured-city',
+      testOperator.decisionLabel,
+      controller.signal,
+    );
+    await waitFor(() => expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(3));
+
+    controller.abort(new DOMException('obsolete attention read', 'AbortError'));
+    const everyReadWasAborted =
+      seenSignals.length === 3 && seenSignals.every((signal) => signal?.aborted === true);
+    if (!everyReadWasAborted) {
+      for (const resolve of fallbackResolvers) resolve({ total: 0, items: [] });
+    }
+    await pending.catch(() => undefined);
+
+    expect(everyReadWasAborted).toBe(true);
   });
 
   it('revalidates an exhausted startup gap until the city recovers', async () => {

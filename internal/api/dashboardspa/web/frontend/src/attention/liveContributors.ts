@@ -152,9 +152,13 @@ export async function fetchBeadsAttention(
   // signals (gascity-dashboard-2j8e.3).
   const read = () =>
     Promise.allSettled([
-      listSupervisorBeads({ limit: ATTENTION_LIST_LIMIT, city: cityName }),
-      listDecisionBeads(cityName, decisionLabel),
-      listEscalationBeads(cityName),
+      listSupervisorBeads({
+        limit: ATTENTION_LIST_LIMIT,
+        city: cityName,
+        ...(signal === undefined ? {} : { signal }),
+      }),
+      listDecisionBeads(cityName, decisionLabel, signal),
+      listEscalationBeads(cityName, signal),
     ] as const);
   throwIfAborted(signal);
   let reads = await read();
@@ -231,18 +235,30 @@ function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
 }
 
-async function listDecisionBeads(cityName: string, decisionLabel: string) {
-  return supervisorApi().listBeads(cityName, {
-    label: decisionLabel,
-    status: 'open',
-  });
+async function listDecisionBeads(
+  cityName: string,
+  decisionLabel: string,
+  signal?: AbortSignal,
+) {
+  return supervisorApi().listBeads(
+    cityName,
+    {
+      label: decisionLabel,
+      status: 'open',
+    },
+    signal,
+  );
 }
 
-async function listEscalationBeads(cityName: string) {
-  return supervisorApi().listBeads(cityName, {
-    label: GC_ESCALATION_LABEL,
-    status: 'open',
-  });
+async function listEscalationBeads(cityName: string, signal?: AbortSignal) {
+  return supervisorApi().listBeads(
+    cityName,
+    {
+      label: GC_ESCALATION_LABEL,
+      status: 'open',
+    },
+    signal,
+  );
 }
 
 async function fetchMailAttention(
