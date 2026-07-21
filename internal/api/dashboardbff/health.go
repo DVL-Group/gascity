@@ -3,6 +3,9 @@ package dashboardbff
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,6 +15,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/load"
+	"github.com/shirou/gopsutil/v4/mem"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 // processStart is captured once at package init and used to derive the admin
@@ -30,8 +38,7 @@ type adminHealth struct {
 }
 
 // hostHealth is the machine-level state, matching the host block of
-// shared/src/dashboard-health.ts SystemHealth. Values are sourced from /proc;
-// any unreadable metric degrades to 0 rather than failing the request.
+// shared/src/dashboard-health.ts SystemHealth.
 type hostHealth struct {
 	LoadAvg1      float64 `json:"load_avg_1"`
 	LoadAvg5      float64 `json:"load_avg_5"`
@@ -84,130 +91,119 @@ var semverRE = regexp.MustCompile(`(\d+\.\d+\.\d+)`)
 // registerHealth wires GET /api/health/system and GET /api/health/local-tools
 // onto the plane mux.
 func (p *Plane) registerHealth() {
-	p.mux.HandleFunc("GET /api/health/system", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, currentSystemHealth())
+	p.mux.HandleFunc("GET /api/health/system", func(w http.ResponseWriter, r *http.Request) {
+		snapshot, err := p.healthSnapshot(r.Context())
+		if err != nil {
+			log.Printf("dashboard system-health sample failed: %v", err)
+			writeError(w, http.StatusServiceUnavailable, "system health unavailable")
+			return
+		}
+		writeJSON(w, http.StatusOK, snapshot)
 	})
 	p.mux.HandleFunc("GET /api/health/local-tools", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, p.localToolVersions(r.Context()))
 	})
 }
 
-// currentSystemHealth assembles the admin and host health blocks. Host metrics
-// come from /proc; an unreadable metric degrades to 0 so the endpoint never
-// errors on a platform without procfs.
-func currentSystemHealth() systemHealth {
-	var mem runtime.MemStats
-	runtime.ReadMemStats(&mem)
+// currentSystemHealth assembles the admin and host health blocks using
+// cross-platform OS samplers. A failed or impossible essential metric fails the
+// snapshot so callers report it as unavailable instead of fabricating zeroes.
+func currentSystemHealth(ctx context.Context) (systemHealth, error) {
+	var runtimeMem runtime.MemStats
+	runtime.ReadMemStats(&runtimeMem)
+	pid := os.Getpid()
+	const maxProcessPID = 1<<31 - 1
+	if pid < 0 || pid > maxProcessPID {
+		return systemHealth{}, fmt.Errorf("opening dashboard process metrics: invalid PID %d", pid)
+	}
+	cpuCount := runtime.NumCPU()
+	if cpuCount <= 0 {
+		return systemHealth{}, fmt.Errorf("reading host CPU count: invalid value %d", cpuCount)
+	}
 
-	l1, l5, l15 := readLoadAvg()
-	total, free := readMemInfo()
+	avg, err := load.AvgWithContext(ctx)
+	if err != nil {
+		return systemHealth{}, fmt.Errorf("reading host load average: %w", err)
+	}
+	if !validLoadAverage(avg.Load1) || !validLoadAverage(avg.Load5) || !validLoadAverage(avg.Load15) {
+		return systemHealth{}, fmt.Errorf("reading host load average: invalid values %.2f, %.2f, %.2f", avg.Load1, avg.Load5, avg.Load15)
+	}
+
+	virtualMemory, err := mem.VirtualMemoryWithContext(ctx)
+	if err != nil {
+		return systemHealth{}, fmt.Errorf("reading host memory: %w", err)
+	}
+	if virtualMemory.Total == 0 || virtualMemory.Available > virtualMemory.Total {
+		return systemHealth{}, fmt.Errorf("reading host memory: invalid total/available values %d/%d", virtualMemory.Total, virtualMemory.Available)
+	}
+
+	uptime, err := host.UptimeWithContext(ctx)
+	if err != nil {
+		return systemHealth{}, fmt.Errorf("reading host uptime: %w", err)
+	}
+	if uptime == 0 {
+		return systemHealth{}, fmt.Errorf("reading host uptime: invalid value %d", uptime)
+	}
+
+	self, err := process.NewProcessWithContext(ctx, int32(pid))
+	if err != nil {
+		return systemHealth{}, fmt.Errorf("opening dashboard process metrics: %w", err)
+	}
+	processMemory, err := self.MemoryInfoWithContext(ctx)
+	if err != nil {
+		return systemHealth{}, fmt.Errorf("reading dashboard process memory: %w", err)
+	}
+	if processMemory.RSS == 0 {
+		return systemHealth{}, fmt.Errorf("reading dashboard process memory: invalid RSS %d", processMemory.RSS)
+	}
+
+	totalMemory, err := metricInt64("host total memory", virtualMemory.Total)
+	if err != nil {
+		return systemHealth{}, err
+	}
+	availableMemory, err := metricInt64("host available memory", virtualMemory.Available)
+	if err != nil {
+		return systemHealth{}, err
+	}
+	rss, err := metricInt64("dashboard process RSS", processMemory.RSS)
+	if err != nil {
+		return systemHealth{}, err
+	}
+	hostUptime, err := metricInt64("host uptime", uptime)
+	if err != nil {
+		return systemHealth{}, err
+	}
 
 	return systemHealth{
 		Admin: adminHealth{
-			Pid:           os.Getpid(),
+			Pid:           pid,
 			UptimeSec:     int64(time.Since(processStart).Round(time.Second).Seconds()),
-			RssBytes:      readRSSBytes(),
-			HeapUsedBytes: int64(mem.HeapAlloc),
+			RssBytes:      rss,
+			HeapUsedBytes: int64(runtimeMem.HeapAlloc),
 			NodeVersion:   runtime.Version(),
 		},
 		Host: hostHealth{
-			LoadAvg1:      l1,
-			LoadAvg5:      l5,
-			LoadAvg15:     l15,
-			TotalMemBytes: total,
-			FreeMemBytes:  free,
-			CPUCount:      runtime.NumCPU(),
-			UptimeSec:     readHostUptime(),
+			LoadAvg1:      avg.Load1,
+			LoadAvg5:      avg.Load5,
+			LoadAvg15:     avg.Load15,
+			TotalMemBytes: totalMemory,
+			FreeMemBytes:  availableMemory,
+			CPUCount:      cpuCount,
+			UptimeSec:     hostUptime,
 		},
-	}
+	}, nil
 }
 
-// readRSSBytes reads resident set size from /proc/self/statm (field 2, in
-// pages) and converts to bytes. Returns 0 when procfs is unavailable.
-func readRSSBytes() int64 {
-	data, err := os.ReadFile("/proc/self/statm")
-	if err != nil {
-		return 0
-	}
-	fields := strings.Fields(string(data))
-	if len(fields) < 2 {
-		return 0
-	}
-	pages, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return pages * int64(os.Getpagesize())
+func validLoadAverage(value float64) bool {
+	return value >= 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
-// readLoadAvg reads the 1/5/15-minute load averages from /proc/loadavg.
-// Missing values degrade to 0.
-func readLoadAvg() (float64, float64, float64) {
-	data, err := os.ReadFile("/proc/loadavg")
-	if err != nil {
-		return 0, 0, 0
+func metricInt64(name string, value uint64) (int64, error) {
+	const maxInt64 = uint64(1<<63 - 1)
+	if value > maxInt64 {
+		return 0, fmt.Errorf("reading %s: value %d overflows int64", name, value)
 	}
-	fields := strings.Fields(string(data))
-	if len(fields) < 3 {
-		return 0, 0, 0
-	}
-	return parseFloat(fields[0]), parseFloat(fields[1]), parseFloat(fields[2])
-}
-
-// readMemInfo reads MemTotal and MemAvailable from /proc/meminfo and converts
-// the kB values to bytes (×1024). MemAvailable maps to free_mem_bytes — it is
-// the kernel's best estimate of allocatable memory, the closest analog to
-// Node's os.freemem(). Missing values degrade to 0.
-func readMemInfo() (total int64, free int64) {
-	data, err := os.ReadFile("/proc/meminfo")
-	if err != nil {
-		return 0, 0
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		switch {
-		case strings.HasPrefix(line, "MemTotal:"):
-			total = parseMemInfoKB(line) * 1024
-		case strings.HasPrefix(line, "MemAvailable:"):
-			free = parseMemInfoKB(line) * 1024
-		}
-	}
-	return total, free
-}
-
-// parseMemInfoKB extracts the kB value from a /proc/meminfo line like
-// "MemTotal:       16384000 kB". Returns 0 on any parse failure.
-func parseMemInfoKB(line string) int64 {
-	fields := strings.Fields(line)
-	if len(fields) < 2 {
-		return 0
-	}
-	v, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return v
-}
-
-// readHostUptime reads system uptime (seconds, rounded) from /proc/uptime.
-// Returns 0 when procfs is unavailable.
-func readHostUptime() int64 {
-	data, err := os.ReadFile("/proc/uptime")
-	if err != nil {
-		return 0
-	}
-	fields := strings.Fields(string(data))
-	if len(fields) < 1 {
-		return 0
-	}
-	return int64(parseFloat(fields[0]) + 0.5)
-}
-
-func parseFloat(s string) float64 {
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0
-	}
-	return v
+	return int64(value), nil
 }
 
 // localToolsCache memoizes one Plane's LocalToolVersions snapshot behind a

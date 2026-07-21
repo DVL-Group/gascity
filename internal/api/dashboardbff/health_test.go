@@ -2,10 +2,35 @@ package dashboardbff
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestHealthSystemReturnsUnavailableWhenSamplingFails(t *testing.T) {
+	p := New(Deps{})
+	p.healthSnapshot = func(context.Context) (systemHealth, error) {
+		return systemHealth{}, errors.New("host metrics unavailable")
+	}
+
+	rec := httptest.NewRecorder()
+	p.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health/system", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	var got apiErrorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if got.Error != "system health unavailable" {
+		t.Errorf("error = %q, want %q", got.Error, "system health unavailable")
+	}
+}
 
 // TestLocalToolVersionsMemoized verifies the MEDIUM finding fix: repeated calls
 // within the TTL reuse the cached snapshot instead of re-probing. The cache is

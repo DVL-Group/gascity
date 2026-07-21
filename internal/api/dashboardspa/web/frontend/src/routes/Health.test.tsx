@@ -257,6 +257,71 @@ describe('HealthPage', () => {
     expect(screen.getByRole('heading', { name: /diagnostics/i })).toBeTruthy();
   });
 
+  it('renders unavailable values instead of non-finite or synthetic zero telemetry', async () => {
+    currentHealth = {
+      ...baseHealth(),
+      admin: {
+        ...baseHealth().admin,
+        rss_bytes: 0,
+      },
+      host: {
+        ...baseHealth().host,
+        total_mem_bytes: 0,
+        free_mem_bytes: 0,
+        uptime_sec: 0,
+      },
+    };
+
+    const { container } = renderPage();
+    await screen.findByRole('heading', { name: /host/i });
+
+    const heading = screen.getByRole('heading', { name: /^health$/i });
+    const synopsis = synopsisFor(heading)?.textContent ?? '';
+    expect(synopsis).toContain('Memory unavailable');
+    expect(synopsis).not.toMatch(/NaN|Infinity/);
+    expect(valueFor(container, 'Memory free')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'Host uptime')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'RSS')?.textContent).toBe('n/a');
+    expect(screen.getByText('telemetry unavailable')).toBeTruthy();
+    expect(container.textContent).not.toContain('0 B of 0 B');
+  });
+
+  it('contains malformed CPU, load, and admin metrics at the display boundary', async () => {
+    currentHealth = {
+      ...baseHealth(),
+      admin: {
+        ...baseHealth().admin,
+        pid: 0,
+        uptime_sec: Number.NaN,
+        heap_used_bytes: Number.POSITIVE_INFINITY,
+      },
+      host: {
+        ...baseHealth().host,
+        cpu_count: 0,
+        load_avg_1: Number.NaN,
+        load_avg_5: Number.POSITIVE_INFINITY,
+        load_avg_15: -1,
+      },
+    };
+
+    const { container } = renderPage();
+    await screen.findByRole('heading', { name: /host/i });
+
+    const heading = screen.getByRole('heading', { name: /^health$/i });
+    const synopsis = synopsisFor(heading)?.textContent ?? '';
+    expect(synopsis).toContain('CPU/load unavailable');
+    expect(valueFor(container, 'CPUs')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'Load (1m, 5m, 15m)')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'PID')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'Heap used')?.textContent).toBe('n/a');
+
+    const adminSection = sectionFor('Admin process');
+    expect(adminSection).not.toBeNull();
+    expect(valueFor(adminSection!, 'Uptime')?.textContent).toBe('n/a');
+    expect(screen.getAllByText('telemetry unavailable').length).toBeGreaterThan(0);
+    expect(container.textContent).not.toMatch(/NaN|Infinity/);
+  });
+
   it('restores diagnostics from local probes plus the cached supervisor status', async () => {
     renderPage();
 

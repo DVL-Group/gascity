@@ -30,6 +30,7 @@ import { formatShortDate } from '../hooks/time';
 import { supervisorApiForRequestBudget } from '../supervisor/client';
 
 const HEALTH_SUPERVISOR_REQUEST_TIMEOUT_MS = 2_500;
+const UNAVAILABLE_METRIC = 'n/a';
 
 export function HealthPage() {
   const attention = useAttentionModel();
@@ -109,6 +110,7 @@ export function HealthPage() {
     localTools !== null ||
     trend !== null ||
     rigStores !== null;
+  const hostMemoryFreeRatio = health === null ? null : memoryFreeRatio(health);
   const hostHealthStatus = health ? hostStatus(health) : undefined;
   const supervisorAttention = prefixedAttentionSeverity(attention, 'health', [
     'health:supervisor-',
@@ -191,22 +193,31 @@ export function HealthPage() {
               </p>
             ) : (
               <KvList>
-                <Kv label="CPUs" value={health.host.cpu_count.toString()} />
+                <Kv
+                  label="CPUs"
+                  value={formatPositiveInteger(health.host.cpu_count)}
+                  {...(!isPositiveInteger(health.host.cpu_count) ? { tone: 'warn' as const } : {})}
+                />
                 <Kv
                   label="Load (1m, 5m, 15m)"
-                  value={`${health.host.load_avg_1.toFixed(2)}, ${health.host.load_avg_5.toFixed(2)}, ${health.host.load_avg_15.toFixed(2)}`}
-                  {...(health.host.load_avg_1 > health.host.cpu_count
+                  value={formatLoadAverages(health)}
+                  {...(!hasValidHostComputeTelemetry(health) ||
+                  health.host.load_avg_1 > health.host.cpu_count
                     ? { tone: 'warn' as const }
                     : {})}
                 />
                 <Kv
                   label="Memory free"
-                  value={`${formatHumanSize(health.host.free_mem_bytes)} of ${formatHumanSize(health.host.total_mem_bytes)}`}
-                  {...(health.host.free_mem_bytes / health.host.total_mem_bytes < 0.1
+                  value={formatMemoryFree(health)}
+                  {...(hostMemoryFreeRatio === null || hostMemoryFreeRatio < 0.1
                     ? { tone: 'warn' as const }
                     : {})}
                 />
-                <Kv label="Host uptime" value={formatDuration(health.host.uptime_sec)} />
+                <Kv
+                  label="Host uptime"
+                  value={formatPositiveDuration(health.host.uptime_sec)}
+                  {...(!isPositiveFinite(health.host.uptime_sec) ? { tone: 'warn' as const } : {})}
+                />
               </KvList>
             )}
           </Section>
@@ -220,10 +231,28 @@ export function HealthPage() {
               </p>
             ) : (
               <KvList>
-                <Kv label="PID" value={health.admin.pid.toString()} />
-                <Kv label="Uptime" value={formatDuration(health.admin.uptime_sec)} />
-                <Kv label="RSS" value={formatHumanSize(health.admin.rss_bytes)} />
-                <Kv label="Heap used" value={formatHumanSize(health.admin.heap_used_bytes)} />
+                <Kv
+                  label="PID"
+                  value={formatPositiveInteger(health.admin.pid)}
+                  {...(!isPositiveInteger(health.admin.pid) ? { tone: 'warn' as const } : {})}
+                />
+                <Kv
+                  label="Uptime"
+                  value={formatPositiveDuration(health.admin.uptime_sec)}
+                  {...(!isPositiveFinite(health.admin.uptime_sec) ? { tone: 'warn' as const } : {})}
+                />
+                <Kv
+                  label="RSS"
+                  value={formatPositiveSize(health.admin.rss_bytes)}
+                  {...(!isPositiveFinite(health.admin.rss_bytes) ? { tone: 'warn' as const } : {})}
+                />
+                <Kv
+                  label="Heap used"
+                  value={formatPositiveSize(health.admin.heap_used_bytes)}
+                  {...(!isPositiveFinite(health.admin.heap_used_bytes)
+                    ? { tone: 'warn' as const }
+                    : {})}
+                />
                 <Kv label="Node" value={health.admin.node_version} />
               </KvList>
             )}
@@ -816,10 +845,13 @@ function buildSynopsis(
     parts.push('Host health unavailable.');
     return parts.join(' ');
   }
-  const usedPct = Math.round(100 * (1 - h.host.free_mem_bytes / h.host.total_mem_bytes));
-  parts.push(
-    `Memory at ${usedPct}%; ${h.host.cpu_count} CPUs averaging ${h.host.load_avg_1.toFixed(2)} load.`,
-  );
+  const freeRatio = memoryFreeRatio(h);
+  const memorySynopsis =
+    freeRatio === null ? 'Memory unavailable' : `Memory at ${Math.round(100 * (1 - freeRatio))}%`;
+  const computeSynopsis = hasValidHostComputeTelemetry(h)
+    ? `${h.host.cpu_count} CPUs averaging ${h.host.load_avg_1.toFixed(2)} load`
+    : 'CPU/load unavailable';
+  parts.push(`${memorySynopsis}; ${computeSynopsis}.`);
   return parts.join(' ');
 }
 
@@ -833,11 +865,80 @@ function supervisorStatus(supervisorState: SupervisorHealthState): {
 }
 
 function hostStatus(h: SystemHealth): { tone: StatusTone; label: string } | undefined {
-  const memPct = h.host.free_mem_bytes / h.host.total_mem_bytes;
+  const memPct = memoryFreeRatio(h);
+  if (
+    memPct === null ||
+    !hasValidHostComputeTelemetry(h) ||
+    !isPositiveFinite(h.host.uptime_sec) ||
+    !hasValidAdminTelemetry(h)
+  ) {
+    return { tone: 'warn', label: 'telemetry unavailable' };
+  }
   if (memPct < 0.05) return { tone: 'stuck', label: 'memory critical' };
   if (memPct < 0.1) return { tone: 'warn', label: 'memory low' };
   if (h.host.load_avg_1 > h.host.cpu_count * 1.5) return { tone: 'warn', label: 'load high' };
   return undefined;
+}
+
+function hasValidHostComputeTelemetry(h: SystemHealth): boolean {
+  return (
+    isPositiveInteger(h.host.cpu_count) &&
+    isNonNegativeFinite(h.host.load_avg_1) &&
+    isNonNegativeFinite(h.host.load_avg_5) &&
+    isNonNegativeFinite(h.host.load_avg_15)
+  );
+}
+
+function hasValidAdminTelemetry(h: SystemHealth): boolean {
+  return (
+    isPositiveInteger(h.admin.pid) &&
+    isPositiveFinite(h.admin.uptime_sec) &&
+    isPositiveFinite(h.admin.rss_bytes) &&
+    isPositiveFinite(h.admin.heap_used_bytes)
+  );
+}
+
+function memoryFreeRatio(h: SystemHealth): number | null {
+  const free = h.host.free_mem_bytes;
+  const total = h.host.total_mem_bytes;
+  if (!Number.isFinite(free) || !Number.isFinite(total) || free < 0 || total <= 0 || free > total) {
+    return null;
+  }
+  return free / total;
+}
+
+function formatMemoryFree(h: SystemHealth): string {
+  if (memoryFreeRatio(h) === null) return UNAVAILABLE_METRIC;
+  return `${formatHumanSize(h.host.free_mem_bytes)} of ${formatHumanSize(h.host.total_mem_bytes)}`;
+}
+
+function isPositiveFinite(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
+}
+
+function isNonNegativeFinite(value: number): boolean {
+  return Number.isFinite(value) && value >= 0;
+}
+
+function isPositiveInteger(value: number): boolean {
+  return Number.isInteger(value) && value > 0;
+}
+
+function formatPositiveInteger(value: number): string {
+  return isPositiveInteger(value) ? value.toString() : UNAVAILABLE_METRIC;
+}
+
+function formatLoadAverages(h: SystemHealth): string {
+  if (!hasValidHostComputeTelemetry(h)) return UNAVAILABLE_METRIC;
+  return `${h.host.load_avg_1.toFixed(2)}, ${h.host.load_avg_5.toFixed(2)}, ${h.host.load_avg_15.toFixed(2)}`;
+}
+
+function formatPositiveDuration(seconds: number): string {
+  return isPositiveFinite(seconds) ? formatDuration(seconds) : UNAVAILABLE_METRIC;
+}
+
+function formatPositiveSize(bytes: number): string {
+  return isPositiveFinite(bytes) ? formatHumanSize(bytes) : UNAVAILABLE_METRIC;
 }
 
 function doltUsageOf(

@@ -86,6 +86,9 @@ type Plane struct {
 	samplers   *samplerManager
 	runTailers *runTailerManager
 	localTools *localToolsCache
+	// healthSnapshot is a per-plane seam so sampler failures can be exercised
+	// without mutating package-global state or the host running the test.
+	healthSnapshot func(context.Context) (systemHealth, error)
 
 	wg   sync.WaitGroup
 	stop context.CancelFunc
@@ -94,7 +97,13 @@ type Plane struct {
 // New builds the /api plane. Call Start to enable background samplers and Stop
 // to drain them on shutdown.
 func New(deps Deps) *Plane {
-	p := &Plane{deps: deps, exec: newExecRunner(), mux: http.NewServeMux(), localTools: &localToolsCache{}}
+	p := &Plane{
+		deps:           deps,
+		exec:           newExecRunner(),
+		mux:            http.NewServeMux(),
+		localTools:     &localToolsCache{},
+		healthSnapshot: currentSystemHealth,
+	}
 	p.samplers = newSamplerManager(deps, p.exec)
 	p.runTailers = newRunTailerManager(deps)
 	p.registerRoutes()
