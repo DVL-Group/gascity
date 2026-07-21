@@ -1,11 +1,17 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunSummary, SourceState } from 'gas-city-dashboard-shared';
 import { invalidate } from '../api/cache';
 import { setActiveCity } from '../api/cityBase';
 import type { OperatorConfig } from '../contexts/OperatorConfigContext';
+import type * as SupervisorClient from '../supervisor/client';
+import { SupervisorApiError } from '../supervisor/client';
 import { composeAttention } from './compose';
-import { runsFactsFromSource, useLiveAttentionContributors } from './liveContributors';
+import {
+  fetchBeadsAttention,
+  runsFactsFromSource,
+  useLiveAttentionContributors,
+} from './liveContributors';
 
 // Operator identity the live hook reads from /config (gascity-dashboard-bhvn).
 const testOperator: OperatorConfig = {
@@ -67,10 +73,17 @@ vi.mock('../api/client', () => ({
 
 const mockSupervisorApiForRequestBudget = vi.hoisted(() => vi.fn());
 
-vi.mock('../supervisor/client', () => ({
-  supervisorApi: () => mockSupervisorApi,
-  supervisorApiForRequestBudget: mockSupervisorApiForRequestBudget,
-}));
+vi.mock('../supervisor/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof SupervisorClient>();
+  return {
+    ...actual,
+    supervisorApi: () => mockSupervisorApi,
+    supervisorApiForRequestBudget: mockSupervisorApiForRequestBudget,
+  };
+});
+
+const CITY_NOT_FOUND_DETAIL = 'not_found: city not found or not running: captured-city';
+const CITY_NOT_FOUND_CODE = 'city-not-found';
 
 describe('useLiveAttentionContributors', () => {
   beforeEach(() => {
@@ -257,13 +270,12 @@ describe('useLiveAttentionContributors', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     invalidate('attention:');
   });
 
   it('composes Home/nav attention from direct supervisor facts and dashboard-local facts', async () => {
-    const { result } = renderHook(() =>
-      useLiveAttentionContributors(testOperator, undefined),
-    );
+    const { result } = renderHook(() => useLiveAttentionContributors(testOperator, undefined));
 
     await waitFor(() => {
       const model = composeAttention(result.current);
@@ -309,6 +321,173 @@ describe('useLiveAttentionContributors', () => {
     expect(mockApi.doltTrend).toHaveBeenCalledTimes(1);
   });
 
+  it('uses one captured city for every bead-attention read', async () => {
+    mockSupervisorApi.listBeads.mockResolvedValue({ total: 0, items: [] });
+    setActiveCity('later-city');
+
+    const facts = await fetchBeadsAttention('captured-city', testOperator.decisionLabel);
+
+    expect(facts).toMatchObject({ items: [], decisions: [], escalations: [] });
+    expect(mockSupervisorApi.listBeads.mock.calls.map(([city]) => city)).toEqual([
+      'captured-city',
+      'captured-city',
+      'captured-city',
+    ]);
+  });
+
+  it('recovers after a city registration gap longer than 250ms', async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    mockSupervisorApi.listBeads.mockImplementation(() => {
+      calls += 1;
+      if (calls <= 6) {
+        return Promise.reject(
+          new SupervisorApiError(
+            404,
+            'localized city availability detail',
+            undefined,
+            CITY_NOT_FOUND_CODE,
+          ),
+        );
+      }
+      return Promise.resolve({ total: 0, items: [] });
+    });
+
+    const pending = fetchBeadsAttention('captured-city', testOperator.decisionLabel);
+    await vi.advanceTimersByTimeAsync(749);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(6);
+    await vi.advanceTimersByTimeAsync(1);
+    const facts = await pending;
+
+    expect(facts).toMatchObject({ items: [], decisions: [], escalations: [] });
+    expect(facts.error).toBeUndefined();
+    expect(facts.decisionsError).toBeUndefined();
+    expect(facts.escalationsError).toBeUndefined();
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(9);
+  });
+
+  it('bounds city-unavailable retries and marks the whole cohort for revalidation', async () => {
+    vi.useFakeTimers();
+    mockSupervisorApi.listBeads.mockRejectedValue(
+      new SupervisorApiError(404, CITY_NOT_FOUND_DETAIL, undefined, CITY_NOT_FOUND_CODE),
+    );
+
+    const pending = fetchBeadsAttention('captured-city', testOperator.decisionLabel);
+    await vi.runAllTimersAsync();
+    const facts = await pending;
+
+    expect(facts).toMatchObject({
+      cityUnavailable: true,
+      error: CITY_NOT_FOUND_DETAIL,
+      decisionsError: CITY_NOT_FOUND_DETAIL,
+      escalationsError: CITY_NOT_FOUND_DETAIL,
+    });
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(15);
+  });
+
+  it('uses the typed problem code instead of matching legacy-looking prose', async () => {
+    mockSupervisorApi.listBeads.mockRejectedValue(
+      new SupervisorApiError(404, CITY_NOT_FOUND_DETAIL, undefined, 'bead-not-found'),
+    );
+
+    const facts = await fetchBeadsAttention('captured-city', testOperator.decisionLabel);
+
+    expect(facts.cityUnavailable).toBeUndefined();
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry a non-city-unavailable error', async () => {
+    mockSupervisorApi.listBeads.mockRejectedValue(
+      new SupervisorApiError(503, 'supervisor unavailable', undefined),
+    );
+
+    const facts = await fetchBeadsAttention('captured-city', testOperator.decisionLabel);
+
+    expect(facts).toMatchObject({
+      error: 'supervisor unavailable',
+      decisionsError: 'supervisor unavailable',
+      escalationsError: 'supervisor unavailable',
+    });
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(3);
+  });
+
+  it('revalidates an exhausted startup gap until the city recovers', async () => {
+    vi.useFakeTimers();
+    setActiveCity('captured-city');
+    let cityAvailable = false;
+    mockSupervisorApi.listBeads.mockImplementation(() =>
+      cityAvailable
+        ? Promise.resolve({ total: 0, items: [] })
+        : Promise.reject(
+            new SupervisorApiError(404, CITY_NOT_FOUND_DETAIL, undefined, CITY_NOT_FOUND_CODE),
+          ),
+    );
+
+    const { result } = renderHook(() => useLiveAttentionContributors(testOperator, undefined));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_750);
+    });
+    expect(composeAttention(result.current).byDomain.beads.items).toHaveLength(3);
+
+    cityAvailable = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+
+    expect(composeAttention(result.current).byDomain.beads.items).toEqual([]);
+    expect(mockSupervisorApi.listBeads).toHaveBeenCalledTimes(18);
+  });
+
+  it('suppresses an obsolete retry when the active city changes', async () => {
+    vi.useFakeTimers();
+    setActiveCity('captured-city');
+    mockSupervisorApi.listBeads.mockImplementation((city: string) =>
+      city === 'captured-city'
+        ? Promise.reject(
+            new SupervisorApiError(404, CITY_NOT_FOUND_DETAIL, undefined, CITY_NOT_FOUND_CODE),
+          )
+        : Promise.resolve({ total: 0, items: [] }),
+    );
+
+    const { result, rerender } = renderHook(() =>
+      useLiveAttentionContributors(testOperator, undefined),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(callsForCity('captured-city')).toHaveLength(3);
+
+    setActiveCity('later-city');
+    rerender();
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(callsForCity('captured-city')).toHaveLength(3);
+    expect(callsForCity('later-city')).toHaveLength(3);
+    expect(composeAttention(result.current).byDomain.beads.items).toEqual([]);
+  });
+
+  it('suppresses an obsolete retry after unmount', async () => {
+    vi.useFakeTimers();
+    setActiveCity('captured-city');
+    mockSupervisorApi.listBeads.mockRejectedValue(
+      new SupervisorApiError(404, CITY_NOT_FOUND_DETAIL, undefined, CITY_NOT_FOUND_CODE),
+    );
+
+    const { unmount } = renderHook(() => useLiveAttentionContributors(testOperator, undefined));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(callsForCity('captured-city')).toHaveLength(3);
+
+    unmount();
+    await vi.runAllTimersAsync();
+
+    expect(callsForCity('captured-city')).toHaveLength(3);
+  });
+
   it('projects the shared run-summary source onto the Runs badge facts (gascity-dashboard-2j8e.7)', () => {
     // The badge reads the SAME source object the /runs page renders, so a fresh
     // source carries its summary + status through, an error source carries the
@@ -329,4 +508,8 @@ describe('useLiveAttentionContributors', () => {
     expect(freshFacts?.provenance).toBe('fresh');
     expect(freshFacts?.fetchedAt).toBe('2026-06-01T00:00:00.000Z');
   });
+
+  function callsForCity(cityName: string) {
+    return mockSupervisorApi.listBeads.mock.calls.filter(([city]) => city === cityName);
+  }
 });

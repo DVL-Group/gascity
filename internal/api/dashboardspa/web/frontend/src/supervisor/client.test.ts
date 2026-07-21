@@ -1107,6 +1107,37 @@ describe('supervisor client wrapper', () => {
     });
   });
 
+  it('preserves the typed problem code on supervisor errors', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            type: 'urn:gascity:error:city-not-found',
+            title: 'City Not Found',
+            status: 404,
+            detail: 'localized city availability detail',
+            code: 'city-not-found',
+          }),
+          {
+            status: 404,
+            headers: { 'content-type': 'application/problem+json' },
+          },
+        ),
+    );
+
+    const api = createSupervisorApi({
+      baseUrl: 'http://gc-supervisor.test',
+      fetch: fetchSpy as typeof fetch,
+    });
+
+    await expect(api.listBeads('captured-city')).rejects.toMatchObject({
+      name: 'SupervisorApiError',
+      status: 404,
+      message: 'localized city availability detail',
+      code: 'city-not-found',
+    });
+  });
+
   it('accepts supervisor responses whose shapes exceed the OpenAPI snapshot (r43k)', async () => {
     // Regression for r43k: the dashboard must not re-validate and reject the
     // supervisor's own valid output. Here `last_activity` is not an RFC3339

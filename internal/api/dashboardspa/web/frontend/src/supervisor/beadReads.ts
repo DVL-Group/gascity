@@ -21,6 +21,7 @@ export interface ListSupervisorBeadsOptions {
   includeBookkeeping?: boolean;
   rigFilter?: string;
   limit?: number;
+  city?: string;
 }
 
 // Pre-exposure load bounds (gascity-dashboard-q89b): board and detail-fallback
@@ -47,7 +48,7 @@ const ENGINEERING_BEAD_TYPES: ReadonlySet<string> = new Set([
 export async function listSupervisorBeads(
   options: ListSupervisorBeadsOptions = {},
 ): Promise<SupervisorBeadList> {
-  const cityName = activeCityOrThrow('list supervisor beads');
+  const cityName = options.city ?? activeCityOrThrow('list supervisor beads');
   const limit = options.limit ?? BEADS_FETCH_LIMIT;
   const rigFilter = options.rigFilter?.trim() ?? '';
   const includeClosed = options.includeClosed ?? false;

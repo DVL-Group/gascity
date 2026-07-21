@@ -72,6 +72,8 @@ export interface AgentsAttentionFacts {
 
 export interface BeadsAttentionFacts {
   items?: readonly Bead[];
+  /** Internal marker: the shared city-readiness boundary rejected this cohort. */
+  cityUnavailable?: boolean;
   /**
    * The label marking a bead as a mayor-decision (DASHBOARD_DECISION_LABEL,
    * gascity-dashboard-bhvn). Carried in the facts so the registry derives the
