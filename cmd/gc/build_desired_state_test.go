@@ -4077,7 +4077,7 @@ func TestRealizePoolDesiredSessionsRebindUpdatesPackWorkspaceMetadata(t *testing
 			"agent_name":                            "worker-7",
 			"alias":                                 "worker-7",
 			"session_name":                          "worker-reusable",
-			"state":                                 "awake",
+			"state":                                 string(sessionpkg.StateAsleep),
 			"pool_slot":                             "7",
 			poolManagedMetadataKey:                  boolMetadata(true),
 			beadmeta.TriggerBeadIDMetadataKey:       "gp-old",
