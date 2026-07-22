@@ -1,8 +1,10 @@
-import { act, renderHook, waitFor } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunSummary, SourceState } from 'gas-city-dashboard-shared';
+import type { Bead } from 'gas-city-dashboard-shared/gc-supervisor';
 import { invalidate } from '../api/cache';
 import { setActiveCity } from '../api/cityBase';
+import { BeadAttentionPanel } from '../components/beads/BeadAttentionPanel';
 import type { OperatorConfig } from '../contexts/OperatorConfigContext';
 import type * as SupervisorClient from '../supervisor/client';
 import { SupervisorApiError } from '../supervisor/client';
@@ -515,6 +517,112 @@ describe('useLiveAttentionContributors', () => {
     expect(composeAttention(result.current).byDomain.beads.items).toEqual([]);
   });
 
+  it('keeps a remounted attention panel on one city when old queue reads resolve late', async () => {
+    setActiveCity('old-city');
+    const oldAll = deferred<{ total: number; items: Bead[] }>();
+    const oldDecisions = deferred<{ total: number; items: Bead[] }>();
+    const oldEscalations = deferred<{ total: number; items: Bead[] }>();
+    const requests: Array<{ path: string; queue: string }> = [];
+
+    mockSupervisorApi.listBeads.mockImplementation(
+      (city: string, query: Record<string, unknown>) => {
+        const queue =
+          query.label === testOperator.decisionLabel
+            ? 'decisions'
+            : query.label === 'gc:escalation'
+              ? 'escalations'
+              : 'all';
+        requests.push({ path: `/v0/city/${city}/beads`, queue });
+
+        if (city === 'old-city') {
+          if (queue === 'decisions') return oldDecisions.promise;
+          if (queue === 'escalations') return oldEscalations.promise;
+          return oldAll.promise;
+        }
+        if (city !== 'new-city') throw new Error(`unexpected city ${city}`);
+        if (queue !== 'decisions') return Promise.resolve({ total: 0, items: [] });
+        return Promise.resolve({
+          total: 1,
+          items: [
+            {
+              id: 'new-decision',
+              title: 'New city decision',
+              status: 'open',
+              issue_type: 'task',
+              created_at: '2026-07-21T00:00:00.000Z',
+              labels: [testOperator.decisionLabel],
+            },
+          ],
+        });
+      },
+    );
+
+    const view = render(<LiveBeadAttentionPanel key="old-city" />);
+    await waitFor(() => expect(requests).toHaveLength(3));
+
+    setActiveCity('new-city');
+    view.rerender(<LiveBeadAttentionPanel key="new-city" />);
+
+    expect(await screen.findByText('New city decision')).toBeTruthy();
+    expect(screen.getByText('Needs you').textContent).toContain('(1)');
+
+    await act(async () => {
+      oldAll.resolve({
+        total: 1,
+        items: [
+          {
+            id: 'old-ready',
+            title: 'Old city ready work',
+            status: 'open',
+            issue_type: 'task',
+            created_at: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      });
+      oldDecisions.resolve({
+        total: 1,
+        items: [
+          {
+            id: 'old-decision',
+            title: 'Old city decision',
+            status: 'open',
+            issue_type: 'task',
+            created_at: '2026-07-20T00:00:00.000Z',
+            labels: [testOperator.decisionLabel],
+          },
+        ],
+      });
+      oldEscalations.resolve({
+        total: 1,
+        items: [
+          {
+            id: 'old-escalation',
+            title: 'Old city escalation',
+            status: 'blocked',
+            issue_type: 'bug',
+            created_at: '2026-07-20T00:00:00.000Z',
+            labels: ['gc:escalation'],
+          },
+        ],
+      });
+      await Promise.all([oldAll.promise, oldDecisions.promise, oldEscalations.promise]);
+    });
+
+    expect(requests).toEqual([
+      { path: '/v0/city/old-city/beads', queue: 'all' },
+      { path: '/v0/city/old-city/beads', queue: 'decisions' },
+      { path: '/v0/city/old-city/beads', queue: 'escalations' },
+      { path: '/v0/city/new-city/beads', queue: 'all' },
+      { path: '/v0/city/new-city/beads', queue: 'decisions' },
+      { path: '/v0/city/new-city/beads', queue: 'escalations' },
+    ]);
+    expect(screen.queryByText('Old city decision')).toBeNull();
+    expect(screen.queryByText(/Old city ready work/)).toBeNull();
+    expect(screen.queryByText(/Old city escalation/)).toBeNull();
+    expect(screen.getByText('New city decision')).toBeTruthy();
+    expect(screen.getByText('Needs you').textContent).toContain('(1)');
+  });
+
   it('suppresses an obsolete retry after unmount', async () => {
     vi.useFakeTimers();
     setActiveCity('captured-city');
@@ -558,4 +666,20 @@ describe('useLiveAttentionContributors', () => {
   function callsForCity(cityName: string) {
     return mockSupervisorApi.listBeads.mock.calls.filter(([city]) => city === cityName);
   }
+
+  function LiveBeadAttentionPanel() {
+    const contributors = useLiveAttentionContributors(testOperator, undefined);
+    const items = composeAttention(contributors).byDomain.beads.items;
+    return <BeadAttentionPanel items={items} onOpen={() => undefined} />;
+  }
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
