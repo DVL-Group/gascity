@@ -243,18 +243,21 @@ describe('useLiveAttentionContributors', () => {
       admin: {
         pid: 123,
         uptime_sec: 600,
-        rss_bytes: 128_000_000,
+        rss: { status: 'available', value: 128_000_000 },
         heap_used_bytes: 64_000_000,
         node_version: 'v22.0.0',
       },
       host: {
-        load_avg_1: 0.5,
-        load_avg_5: 0.4,
-        load_avg_15: 0.3,
-        total_mem_bytes: 100,
-        free_mem_bytes: 4,
+        load: {
+          status: 'available',
+          value: { load_avg_1: 0.5, load_avg_5: 0.4, load_avg_15: 0.3 },
+        },
+        memory: {
+          status: 'available',
+          value: { total_mem_bytes: 100, free_mem_bytes: 4 },
+        },
         cpu_count: 8,
-        uptime_sec: 86_400,
+        uptime: { status: 'available', value: 86_400 },
       },
     });
     mockApi.doltTrend.mockResolvedValue({

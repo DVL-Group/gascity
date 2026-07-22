@@ -262,13 +262,12 @@ describe('HealthPage', () => {
       ...baseHealth(),
       admin: {
         ...baseHealth().admin,
-        rss_bytes: 0,
+        rss: { status: 'unavailable', reason: 'sample_failed' },
       },
       host: {
         ...baseHealth().host,
-        total_mem_bytes: 0,
-        free_mem_bytes: 0,
-        uptime_sec: 0,
+        memory: { status: 'unavailable', reason: 'invalid_sample' },
+        uptime: { status: 'unavailable', reason: 'sample_failed' },
       },
     };
 
@@ -282,7 +281,9 @@ describe('HealthPage', () => {
     expect(valueFor(container, 'Memory free')?.textContent).toBe('n/a');
     expect(valueFor(container, 'Host uptime')?.textContent).toBe('n/a');
     expect(valueFor(container, 'RSS')?.textContent).toBe('n/a');
+    expect(valueFor(container, 'Load (1m, 5m, 15m)')?.textContent).toBe('0.42, 0.55, 0.61');
     expect(screen.getByText('telemetry unavailable')).toBeTruthy();
+    expect(screen.queryByText(/dashboard host health unavailable/i)).toBeNull();
     expect(container.textContent).not.toContain('0 B of 0 B');
   });
 
@@ -292,15 +293,20 @@ describe('HealthPage', () => {
       admin: {
         ...baseHealth().admin,
         pid: 0,
-        uptime_sec: Number.NaN,
-        heap_used_bytes: Number.POSITIVE_INFINITY,
+        uptime_sec: -1,
+        heap_used_bytes: -1,
       },
       host: {
         ...baseHealth().host,
         cpu_count: 0,
-        load_avg_1: Number.NaN,
-        load_avg_5: Number.POSITIVE_INFINITY,
-        load_avg_15: -1,
+        load: {
+          status: 'available',
+          value: {
+            load_avg_1: -1,
+            load_avg_5: -1,
+            load_avg_15: -1,
+          },
+        },
       },
     };
 
@@ -453,7 +459,13 @@ describe('HealthPage', () => {
       ...baseHealth(),
       host: {
         ...baseHealth().host,
-        free_mem_bytes: 400_000_000,
+        memory: {
+          status: 'available',
+          value: {
+            total_mem_bytes: 16_000_000_000,
+            free_mem_bytes: 400_000_000,
+          },
+        },
       },
     };
     currentTrend = {
@@ -567,18 +579,21 @@ function baseHealth(): SystemHealth {
     admin: {
       pid: 4242,
       uptime_sec: 600,
-      rss_bytes: 50_000_000,
+      rss: { status: 'available', value: 50_000_000 },
       heap_used_bytes: 30_000_000,
       node_version: 'v20.10.0',
     },
     host: {
-      load_avg_1: 0.42,
-      load_avg_5: 0.55,
-      load_avg_15: 0.61,
-      total_mem_bytes: 16_000_000_000,
-      free_mem_bytes: 8_000_000_000,
+      load: {
+        status: 'available',
+        value: { load_avg_1: 0.42, load_avg_5: 0.55, load_avg_15: 0.61 },
+      },
+      memory: {
+        status: 'available',
+        value: { total_mem_bytes: 16_000_000_000, free_mem_bytes: 8_000_000_000 },
+      },
       cpu_count: 8,
-      uptime_sec: 86_400,
+      uptime: { status: 'available', value: 86_400 },
     },
   };
 }

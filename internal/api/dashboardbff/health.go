@@ -30,23 +30,63 @@ var processStart = time.Now()
 // of shared/src/dashboard-health.ts SystemHealth. node_version carries the Go
 // runtime version (this backend is the Go port of the former Node BFF).
 type adminHealth struct {
-	Pid           int    `json:"pid"`
-	UptimeSec     int64  `json:"uptime_sec"`
-	RssBytes      int64  `json:"rss_bytes"`
-	HeapUsedBytes int64  `json:"heap_used_bytes"`
-	NodeVersion   string `json:"node_version"`
+	Pid           int                 `json:"pid"`
+	UptimeSec     int64               `json:"uptime_sec"`
+	RSS           healthMetric[int64] `json:"rss"`
+	HeapUsedBytes int64               `json:"heap_used_bytes"`
+	NodeVersion   string              `json:"node_version"`
 }
 
 // hostHealth is the machine-level state, matching the host block of
 // shared/src/dashboard-health.ts SystemHealth.
 type hostHealth struct {
-	LoadAvg1      float64 `json:"load_avg_1"`
-	LoadAvg5      float64 `json:"load_avg_5"`
-	LoadAvg15     float64 `json:"load_avg_15"`
-	TotalMemBytes int64   `json:"total_mem_bytes"`
-	FreeMemBytes  int64   `json:"free_mem_bytes"`
-	CPUCount      int     `json:"cpu_count"`
-	UptimeSec     int64   `json:"uptime_sec"`
+	Load     healthMetric[hostLoadAverages] `json:"load"`
+	Memory   healthMetric[hostMemory]       `json:"memory"`
+	CPUCount int                            `json:"cpu_count"`
+	Uptime   healthMetric[int64]            `json:"uptime"`
+}
+
+type hostLoadAverages struct {
+	LoadAvg1  float64 `json:"load_avg_1"`
+	LoadAvg5  float64 `json:"load_avg_5"`
+	LoadAvg15 float64 `json:"load_avg_15"`
+}
+
+type hostMemory struct {
+	TotalMemBytes int64 `json:"total_mem_bytes"`
+	FreeMemBytes  int64 `json:"free_mem_bytes"`
+}
+
+type healthMetricStatus string
+
+const (
+	healthMetricAvailable   healthMetricStatus = "available"
+	healthMetricUnavailable healthMetricStatus = "unavailable"
+)
+
+type healthMetricUnavailableReason string
+
+const (
+	healthMetricSampleFailed  healthMetricUnavailableReason = "sample_failed"
+	healthMetricInvalidSample healthMetricUnavailableReason = "invalid_sample"
+	healthMetricValueOverflow healthMetricUnavailableReason = "value_overflow"
+)
+
+// healthMetric is an independently sampled host measurement. Available values
+// and unavailable reasons are mutually exclusive on the wire, so clients
+// cannot mistake a sampler failure for a numeric zero.
+type healthMetric[T any] struct {
+	Status healthMetricStatus            `json:"status"`
+	Value  *T                            `json:"value,omitempty"`
+	Reason healthMetricUnavailableReason `json:"reason,omitempty"`
+}
+
+func availableHealthMetric[T any](value T) healthMetric[T] {
+	return healthMetric[T]{Status: healthMetricAvailable, Value: &value}
+}
+
+func unavailableHealthMetric[T any](reason healthMetricUnavailableReason) healthMetric[T] {
+	return healthMetric[T]{Status: healthMetricUnavailable, Reason: reason}
 }
 
 // systemHealth is the GET /api/health/system response, matching
@@ -105,19 +145,41 @@ func (p *Plane) registerHealth() {
 	})
 }
 
+type healthSamplers struct {
+	loadAverage   func() (*load.AvgStat, error)
+	virtualMemory func(context.Context) (*mem.VirtualMemoryStat, error)
+	hostUptime    func(context.Context) (uint64, error)
+	processRSS    func(context.Context, int32) (uint64, error)
+}
+
 // currentSystemHealth assembles the admin and host health blocks using
-// cross-platform OS samplers. A failed or impossible essential metric fails the
-// snapshot so callers report it as unavailable instead of fabricating zeroes.
+// cross-platform OS samplers. Each fallible metric carries its own availability
+// state so one failed sampler cannot hide independent successful measurements.
 func currentSystemHealth(ctx context.Context) (systemHealth, error) {
 	// On Windows, the first gopsutil Avg call starts a process-global sampler
 	// under the supplied context. A request context would stop that singleton
 	// permanently when the request ends, so always give it process lifetime.
-	return currentSystemHealthWithLoadSampler(ctx, load.Avg)
+	return currentSystemHealthWithSamplers(ctx, healthSamplers{
+		loadAverage:   load.Avg,
+		virtualMemory: mem.VirtualMemoryWithContext,
+		hostUptime:    host.UptimeWithContext,
+		processRSS: func(ctx context.Context, pid int32) (uint64, error) {
+			self, err := process.NewProcessWithContext(ctx, pid)
+			if err != nil {
+				return 0, fmt.Errorf("opening dashboard process metrics: %w", err)
+			}
+			processMemory, err := self.MemoryInfoWithContext(ctx)
+			if err != nil {
+				return 0, fmt.Errorf("reading dashboard process memory: %w", err)
+			}
+			return processMemory.RSS, nil
+		},
+	})
 }
 
-func currentSystemHealthWithLoadSampler(
+func currentSystemHealthWithSamplers(
 	ctx context.Context,
-	loadAverage func() (*load.AvgStat, error),
+	samplers healthSamplers,
 ) (systemHealth, error) {
 	var runtimeMem runtime.MemStats
 	runtime.ReadMemStats(&runtimeMem)
@@ -131,89 +193,111 @@ func currentSystemHealthWithLoadSampler(
 		return systemHealth{}, fmt.Errorf("reading host CPU count: invalid value %d", cpuCount)
 	}
 
-	avg, err := loadAverage()
-	if err != nil {
-		return systemHealth{}, fmt.Errorf("reading host load average: %w", err)
-	}
-	if !validLoadAverage(avg.Load1) || !validLoadAverage(avg.Load5) || !validLoadAverage(avg.Load15) {
-		return systemHealth{}, fmt.Errorf("reading host load average: invalid values %.2f, %.2f, %.2f", avg.Load1, avg.Load5, avg.Load15)
-	}
-
-	virtualMemory, err := mem.VirtualMemoryWithContext(ctx)
-	if err != nil {
-		return systemHealth{}, fmt.Errorf("reading host memory: %w", err)
-	}
-	if virtualMemory.Total == 0 || virtualMemory.Available > virtualMemory.Total {
-		return systemHealth{}, fmt.Errorf("reading host memory: invalid total/available values %d/%d", virtualMemory.Total, virtualMemory.Available)
-	}
-
-	uptime, err := host.UptimeWithContext(ctx)
-	if err != nil {
-		return systemHealth{}, fmt.Errorf("reading host uptime: %w", err)
-	}
-	if uptime == 0 {
-		return systemHealth{}, fmt.Errorf("reading host uptime: invalid value %d", uptime)
-	}
-
-	self, err := process.NewProcessWithContext(ctx, int32(pid))
-	if err != nil {
-		return systemHealth{}, fmt.Errorf("opening dashboard process metrics: %w", err)
-	}
-	processMemory, err := self.MemoryInfoWithContext(ctx)
-	if err != nil {
-		return systemHealth{}, fmt.Errorf("reading dashboard process memory: %w", err)
-	}
-	if processMemory.RSS == 0 {
-		return systemHealth{}, fmt.Errorf("reading dashboard process memory: invalid RSS %d", processMemory.RSS)
-	}
-
-	totalMemory, err := metricInt64("host total memory", virtualMemory.Total)
-	if err != nil {
-		return systemHealth{}, err
-	}
-	availableMemory, err := metricInt64("host available memory", virtualMemory.Available)
-	if err != nil {
-		return systemHealth{}, err
-	}
-	rss, err := metricInt64("dashboard process RSS", processMemory.RSS)
-	if err != nil {
-		return systemHealth{}, err
-	}
-	hostUptime, err := metricInt64("host uptime", uptime)
-	if err != nil {
-		return systemHealth{}, err
-	}
+	loadMetric := sampleLoadAverage(samplers.loadAverage)
+	memoryMetric := sampleHostMemory(ctx, samplers.virtualMemory)
+	uptimeMetric := samplePositiveInt64Metric(ctx, "host uptime", samplers.hostUptime)
+	rssMetric := sampleProcessRSS(ctx, int32(pid), samplers.processRSS)
 
 	return systemHealth{
 		Admin: adminHealth{
 			Pid:           pid,
 			UptimeSec:     int64(time.Since(processStart).Round(time.Second).Seconds()),
-			RssBytes:      rss,
+			RSS:           rssMetric,
 			HeapUsedBytes: int64(runtimeMem.HeapAlloc),
 			NodeVersion:   runtime.Version(),
 		},
 		Host: hostHealth{
-			LoadAvg1:      avg.Load1,
-			LoadAvg5:      avg.Load5,
-			LoadAvg15:     avg.Load15,
-			TotalMemBytes: totalMemory,
-			FreeMemBytes:  availableMemory,
-			CPUCount:      cpuCount,
-			UptimeSec:     hostUptime,
+			Load:     loadMetric,
+			Memory:   memoryMetric,
+			CPUCount: cpuCount,
+			Uptime:   uptimeMetric,
 		},
 	}, nil
+}
+
+func sampleLoadAverage(sample func() (*load.AvgStat, error)) healthMetric[hostLoadAverages] {
+	avg, err := sample()
+	if err != nil {
+		return failedHealthMetric[hostLoadAverages]("host load average", healthMetricSampleFailed, err)
+	}
+	if avg == nil || !validLoadAverage(avg.Load1) || !validLoadAverage(avg.Load5) || !validLoadAverage(avg.Load15) {
+		return failedHealthMetric[hostLoadAverages]("host load average", healthMetricInvalidSample, fmt.Errorf("invalid load average values"))
+	}
+	return availableHealthMetric(hostLoadAverages{
+		LoadAvg1: avg.Load1, LoadAvg5: avg.Load5, LoadAvg15: avg.Load15,
+	})
+}
+
+func sampleHostMemory(
+	ctx context.Context,
+	sample func(context.Context) (*mem.VirtualMemoryStat, error),
+) healthMetric[hostMemory] {
+	virtualMemory, err := sample(ctx)
+	if err != nil {
+		return failedHealthMetric[hostMemory]("host memory", healthMetricSampleFailed, err)
+	}
+	if virtualMemory == nil || virtualMemory.Total == 0 || virtualMemory.Available > virtualMemory.Total {
+		return failedHealthMetric[hostMemory]("host memory", healthMetricInvalidSample, fmt.Errorf("invalid total/available values"))
+	}
+	if uint64OverflowsInt64(virtualMemory.Total) || uint64OverflowsInt64(virtualMemory.Available) {
+		return failedHealthMetric[hostMemory]("host memory", healthMetricValueOverflow, fmt.Errorf("total/available value overflows int64"))
+	}
+	return availableHealthMetric(hostMemory{
+		TotalMemBytes: int64(virtualMemory.Total),
+		FreeMemBytes:  int64(virtualMemory.Available),
+	})
+}
+
+func samplePositiveInt64Metric(
+	ctx context.Context,
+	name string,
+	sample func(context.Context) (uint64, error),
+) healthMetric[int64] {
+	value, err := sample(ctx)
+	if err != nil {
+		return failedHealthMetric[int64](name, healthMetricSampleFailed, err)
+	}
+	return positiveInt64HealthMetric(name, value)
+}
+
+func sampleProcessRSS(
+	ctx context.Context,
+	pid int32,
+	sample func(context.Context, int32) (uint64, error),
+) healthMetric[int64] {
+	value, err := sample(ctx, pid)
+	if err != nil {
+		return failedHealthMetric[int64]("dashboard process RSS", healthMetricSampleFailed, err)
+	}
+	return positiveInt64HealthMetric("dashboard process RSS", value)
+}
+
+func positiveInt64HealthMetric(name string, value uint64) healthMetric[int64] {
+	if value == 0 {
+		return failedHealthMetric[int64](name, healthMetricInvalidSample, fmt.Errorf("invalid zero value"))
+	}
+	if uint64OverflowsInt64(value) {
+		return failedHealthMetric[int64](name, healthMetricValueOverflow, fmt.Errorf("value %d overflows int64", value))
+	}
+	return availableHealthMetric(int64(value))
+}
+
+func failedHealthMetric[T any](
+	name string,
+	reason healthMetricUnavailableReason,
+	err error,
+) healthMetric[T] {
+	log.Printf("dashboard system-health metric %s unavailable (%s): %v", name, reason, err)
+	return unavailableHealthMetric[T](reason)
 }
 
 func validLoadAverage(value float64) bool {
 	return value >= 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
-func metricInt64(name string, value uint64) (int64, error) {
+func uint64OverflowsInt64(value uint64) bool {
 	const maxInt64 = uint64(1<<63 - 1)
-	if value > maxInt64 {
-		return 0, fmt.Errorf("reading %s: value %d overflows int64", name, value)
-	}
-	return int64(value), nil
+	return value > maxInt64
 }
 
 // localToolsCache memoizes one Plane's LocalToolVersions snapshot behind a

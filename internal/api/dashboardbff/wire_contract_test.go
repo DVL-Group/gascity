@@ -93,6 +93,16 @@ func TestWireContractSystemHealth(t *testing.T) {
 	m := wireGet(t, contractPlane(), "/api/health/system")
 	mustObject(t, m, "admin")
 	mustObject(t, m, "host")
+	admin := m["admin"].(map[string]any)
+	host := m["host"].(map[string]any)
+	for _, field := range []string{"rss"} {
+		mustObject(t, admin, field)
+		mustString(t, admin[field].(map[string]any), "status")
+	}
+	for _, field := range []string{"load", "memory", "uptime"} {
+		mustObject(t, host, field)
+		mustString(t, host[field].(map[string]any), "status")
+	}
 }
 
 func TestWireContractLocalTools(t *testing.T) {

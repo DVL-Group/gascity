@@ -232,18 +232,18 @@ func TestHealthSystemReturnsNestedJSON(t *testing.T) {
 	if got.Host.CPUCount < 1 {
 		t.Errorf("host.cpu_count = %d, want >= 1", got.Host.CPUCount)
 	}
-	if got.Admin.RssBytes <= 0 {
-		t.Errorf("admin.rss_bytes = %d, want > 0", got.Admin.RssBytes)
+	if got.Admin.RSS.Status != healthMetricAvailable || got.Admin.RSS.Value == nil || *got.Admin.RSS.Value <= 0 {
+		t.Errorf("admin.rss = %#v, want available value > 0", got.Admin.RSS)
 	}
-	if got.Host.TotalMemBytes <= 0 {
-		t.Errorf("host.total_mem_bytes = %d, want > 0", got.Host.TotalMemBytes)
+	if got.Host.Memory.Status != healthMetricAvailable || got.Host.Memory.Value == nil || got.Host.Memory.Value.TotalMemBytes <= 0 {
+		t.Errorf("host.memory = %#v, want available total > 0", got.Host.Memory)
 	}
-	if got.Host.UptimeSec <= 0 {
-		t.Errorf("host.uptime_sec = %d, want > 0", got.Host.UptimeSec)
+	if got.Host.Uptime.Status != healthMetricAvailable || got.Host.Uptime.Value == nil || *got.Host.Uptime.Value <= 0 {
+		t.Errorf("host.uptime = %#v, want available value > 0", got.Host.Uptime)
 	}
 	// The nested objects must be present on the wire, snake_case keys intact.
 	js := rec.Body.String()
-	for _, key := range []string{`"admin"`, `"host"`, `"heap_used_bytes"`, `"load_avg_1"`, `"total_mem_bytes"`} {
+	for _, key := range []string{`"admin"`, `"host"`, `"heap_used_bytes"`, `"load"`, `"memory"`, `"uptime"`, `"rss"`, `"status":"available"`} {
 		if !strings.Contains(js, key) {
 			t.Errorf("system health JSON missing %s: %s", key, js)
 		}

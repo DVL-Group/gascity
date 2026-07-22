@@ -1,6 +1,7 @@
 import { useCallback, type ReactNode } from 'react';
 import type {
   DoltNomsTrend,
+  HealthMetric,
   LocalToolVersion,
   LocalToolVersions,
   RigStoreHealth,
@@ -202,7 +203,7 @@ export function HealthPage() {
                   label="Load (1m, 5m, 15m)"
                   value={formatLoadAverages(health)}
                   {...(!hasValidHostComputeTelemetry(health) ||
-                  health.host.load_avg_1 > health.host.cpu_count
+                  loadAverage1(health) > health.host.cpu_count
                     ? { tone: 'warn' as const }
                     : {})}
                 />
@@ -215,8 +216,10 @@ export function HealthPage() {
                 />
                 <Kv
                   label="Host uptime"
-                  value={formatPositiveDuration(health.host.uptime_sec)}
-                  {...(!isPositiveFinite(health.host.uptime_sec) ? { tone: 'warn' as const } : {})}
+                  value={formatHealthMetricDuration(health.host.uptime)}
+                  {...(!hasPositiveMetricValue(health.host.uptime)
+                    ? { tone: 'warn' as const }
+                    : {})}
                 />
               </KvList>
             )}
@@ -243,8 +246,8 @@ export function HealthPage() {
                 />
                 <Kv
                   label="RSS"
-                  value={formatPositiveSize(health.admin.rss_bytes)}
-                  {...(!isPositiveFinite(health.admin.rss_bytes) ? { tone: 'warn' as const } : {})}
+                  value={formatHealthMetricSize(health.admin.rss)}
+                  {...(!hasPositiveMetricValue(health.admin.rss) ? { tone: 'warn' as const } : {})}
                 />
                 <Kv
                   label="Heap used"
@@ -849,7 +852,7 @@ function buildSynopsis(
   const memorySynopsis =
     freeRatio === null ? 'Memory unavailable' : `Memory at ${Math.round(100 * (1 - freeRatio))}%`;
   const computeSynopsis = hasValidHostComputeTelemetry(h)
-    ? `${h.host.cpu_count} CPUs averaging ${h.host.load_avg_1.toFixed(2)} load`
+    ? `${h.host.cpu_count} CPUs averaging ${loadAverage1(h).toFixed(2)} load`
     : 'CPU/load unavailable';
   parts.push(`${memorySynopsis}; ${computeSynopsis}.`);
   return parts.join(' ');
@@ -869,23 +872,27 @@ function hostStatus(h: SystemHealth): { tone: StatusTone; label: string } | unde
   if (
     memPct === null ||
     !hasValidHostComputeTelemetry(h) ||
-    !isPositiveFinite(h.host.uptime_sec) ||
+    !hasPositiveMetricValue(h.host.uptime) ||
     !hasValidAdminTelemetry(h)
   ) {
     return { tone: 'warn', label: 'telemetry unavailable' };
   }
   if (memPct < 0.05) return { tone: 'stuck', label: 'memory critical' };
   if (memPct < 0.1) return { tone: 'warn', label: 'memory low' };
-  if (h.host.load_avg_1 > h.host.cpu_count * 1.5) return { tone: 'warn', label: 'load high' };
+  if (loadAverage1(h) > h.host.cpu_count * 1.5) {
+    return { tone: 'warn', label: 'load high' };
+  }
   return undefined;
 }
 
 function hasValidHostComputeTelemetry(h: SystemHealth): boolean {
+  if (h.host.load.status !== 'available') return false;
+  const load = h.host.load.value;
   return (
     isPositiveInteger(h.host.cpu_count) &&
-    isNonNegativeFinite(h.host.load_avg_1) &&
-    isNonNegativeFinite(h.host.load_avg_5) &&
-    isNonNegativeFinite(h.host.load_avg_15)
+    isNonNegativeFinite(load.load_avg_1) &&
+    isNonNegativeFinite(load.load_avg_5) &&
+    isNonNegativeFinite(load.load_avg_15)
   );
 }
 
@@ -893,14 +900,15 @@ function hasValidAdminTelemetry(h: SystemHealth): boolean {
   return (
     isPositiveInteger(h.admin.pid) &&
     isPositiveFinite(h.admin.uptime_sec) &&
-    isPositiveFinite(h.admin.rss_bytes) &&
+    hasPositiveMetricValue(h.admin.rss) &&
     isPositiveFinite(h.admin.heap_used_bytes)
   );
 }
 
 function memoryFreeRatio(h: SystemHealth): number | null {
-  const free = h.host.free_mem_bytes;
-  const total = h.host.total_mem_bytes;
+  if (h.host.memory.status !== 'available') return null;
+  const free = h.host.memory.value.free_mem_bytes;
+  const total = h.host.memory.value.total_mem_bytes;
   if (!Number.isFinite(free) || !Number.isFinite(total) || free < 0 || total <= 0 || free > total) {
     return null;
   }
@@ -909,7 +917,8 @@ function memoryFreeRatio(h: SystemHealth): number | null {
 
 function formatMemoryFree(h: SystemHealth): string {
   if (memoryFreeRatio(h) === null) return UNAVAILABLE_METRIC;
-  return `${formatHumanSize(h.host.free_mem_bytes)} of ${formatHumanSize(h.host.total_mem_bytes)}`;
+  if (h.host.memory.status !== 'available') return UNAVAILABLE_METRIC;
+  return `${formatHumanSize(h.host.memory.value.free_mem_bytes)} of ${formatHumanSize(h.host.memory.value.total_mem_bytes)}`;
 }
 
 function isPositiveFinite(value: number): boolean {
@@ -930,7 +939,31 @@ function formatPositiveInteger(value: number): string {
 
 function formatLoadAverages(h: SystemHealth): string {
   if (!hasValidHostComputeTelemetry(h)) return UNAVAILABLE_METRIC;
-  return `${h.host.load_avg_1.toFixed(2)}, ${h.host.load_avg_5.toFixed(2)}, ${h.host.load_avg_15.toFixed(2)}`;
+  if (h.host.load.status !== 'available') return UNAVAILABLE_METRIC;
+  const load = h.host.load.value;
+  return `${load.load_avg_1.toFixed(2)}, ${load.load_avg_5.toFixed(2)}, ${load.load_avg_15.toFixed(2)}`;
+}
+
+function loadAverage1(h: SystemHealth): number {
+  return h.host.load.status === 'available' && isNonNegativeFinite(h.host.load.value.load_avg_1)
+    ? h.host.load.value.load_avg_1
+    : 0;
+}
+
+function hasPositiveMetricValue(metric: HealthMetric<number>): boolean {
+  return metric.status === 'available' && isPositiveFinite(metric.value);
+}
+
+function formatHealthMetricDuration(metric: HealthMetric<number>): string {
+  return hasPositiveMetricValue(metric) && metric.status === 'available'
+    ? formatDuration(metric.value)
+    : UNAVAILABLE_METRIC;
+}
+
+function formatHealthMetricSize(metric: HealthMetric<number>): string {
+  return hasPositiveMetricValue(metric) && metric.status === 'available'
+    ? formatHumanSize(metric.value)
+    : UNAVAILABLE_METRIC;
 }
 
 function formatPositiveDuration(seconds: number): string {

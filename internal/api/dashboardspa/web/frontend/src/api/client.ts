@@ -233,9 +233,60 @@ const decodeRuntimeConfig = objectDecoder<DashboardRuntimeConfig>('config', (rec
   requireStringArrayOrNullField(record, url, 'config', 'enabledModules');
   requireNullableStringField(record, url, 'config', 'defaultView');
 });
+const healthMetricUnavailableReasons = new Set([
+  'sample_failed',
+  'invalid_sample',
+  'value_overflow',
+]);
+
+function requireHealthMetricField(
+  record: JsonRecord,
+  url: string,
+  label: string,
+  field: string,
+  validateValue: (value: unknown, url: string, label: string) => void,
+): void {
+  const metric = requireRecord(record[field], url, `${label}.${field}`);
+  requireStringField(metric, url, `${label}.${field}`, 'status');
+  if (metric.status === 'available') {
+    validateValue(metric.value, url, `${label}.${field}.value`);
+    return;
+  }
+  if (metric.status !== 'unavailable') {
+    failDecode(url, `${label}.${field}.status must be available or unavailable`);
+  }
+  requireStringField(metric, url, `${label}.${field}`, 'reason');
+  if (!healthMetricUnavailableReasons.has(metric.reason as string)) {
+    failDecode(url, `${label}.${field}.reason is not recognized`);
+  }
+}
+
+function requireNumberValue(value: unknown, url: string, label: string): void {
+  if (typeof value !== 'number') failDecode(url, `${label} must be a number`);
+}
+
 const decodeSystemHealth = objectDecoder<SystemHealth>('system health', (record, url) => {
-  requireObjectField(record, url, 'system health', 'admin');
-  requireObjectField(record, url, 'system health', 'host');
+  const admin = requireRecord(record.admin, url, 'system health.admin');
+  const host = requireRecord(record.host, url, 'system health.host');
+  requireNumberField(admin, url, 'system health.admin', 'pid');
+  requireNumberField(admin, url, 'system health.admin', 'uptime_sec');
+  requireNumberField(admin, url, 'system health.admin', 'heap_used_bytes');
+  requireStringField(admin, url, 'system health.admin', 'node_version');
+  requireHealthMetricField(admin, url, 'system health.admin', 'rss', requireNumberValue);
+
+  requireNumberField(host, url, 'system health.host', 'cpu_count');
+  requireHealthMetricField(host, url, 'system health.host', 'uptime', requireNumberValue);
+  requireHealthMetricField(host, url, 'system health.host', 'load', (value, metricURL, label) => {
+    const load = requireRecord(value, metricURL, label);
+    requireNumberField(load, metricURL, label, 'load_avg_1');
+    requireNumberField(load, metricURL, label, 'load_avg_5');
+    requireNumberField(load, metricURL, label, 'load_avg_15');
+  });
+  requireHealthMetricField(host, url, 'system health.host', 'memory', (value, metricURL, label) => {
+    const memory = requireRecord(value, metricURL, label);
+    requireNumberField(memory, metricURL, label, 'total_mem_bytes');
+    requireNumberField(memory, metricURL, label, 'free_mem_bytes');
+  });
 });
 function requireLocalToolVersionField(
   record: JsonRecord,
@@ -420,7 +471,11 @@ export const api = {
   // failure), an unknown run with 404, and a still-warming projection with
   // 503 — surfaced to callers as ApiClientError (status + reason).
   runDetail(runId: string): Promise<FormulaRunDetail> {
-    return request('GET', cityPath(`/runs/${encodeURIComponent(runId)}/detail`), decodeFormulaRunDetail);
+    return request(
+      'GET',
+      cityPath(`/runs/${encodeURIComponent(runId)}/detail`),
+      decodeFormulaRunDetail,
+    );
   },
   // The per-run SSE detail stream (BFF plane). It pushes the whole
   // FormulaRunDetail as a snapshot frame on connect and again whenever the
