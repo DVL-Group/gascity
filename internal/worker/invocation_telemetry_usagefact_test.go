@@ -209,9 +209,9 @@ func TestModelUsageFact(t *testing.T) {
 		CacheReadTokens:     10,
 		CacheCreationTokens: 5,
 	}
-	// The session bead carries gc.active_work_bead (the step it is currently on),
-	// stamped by the claim hook; modelUsageFact reads it into Fact.StepID.
-	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7", "gc.active_work_bead": "mol.finalize"}}
+	// modelUsageFact resolves RunID from the run chain; StepID is intentionally
+	// left unset — model usage is attributed at run level, not per formula step.
+	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
 
 	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now)
 	if priced.Kind != usage.KindModel {
@@ -226,10 +226,10 @@ func TestModelUsageFact(t *testing.T) {
 	if priced.SessionID != "session-1" {
 		t.Fatalf("SessionID = %q, want the session bead id session-1", priced.SessionID)
 	}
-	// StepID is the session's gc.active_work_bead (the bare logical step), distinct
-	// from RunID — the exact-join key to the events plane and per-step spend rollup.
-	if priced.StepID != "mol.finalize" {
-		t.Fatalf("StepID = %q, want mol.finalize (the session's gc.active_work_bead), distinct from RunID", priced.StepID)
+	// StepID is intentionally unset: model usage is attributed at run level, not per
+	// formula step (the gc.active_work_bead session pointer was retired).
+	if priced.StepID != "" {
+		t.Fatalf("StepID = %q, want empty (run-level attribution)", priced.StepID)
 	}
 	if priced.Worker != "myrig/polecat-1" || priced.Model != "claude-opus-4-7" || priced.Provider != "claude" {
 		t.Fatalf("identity wrong: %+v", priced)
@@ -373,11 +373,8 @@ func TestFactorySweepSessionModelUsageClaude(t *testing.T) {
 		usageEntryWithMessageID("u2", "msg-2", 200, 100, 0, 0),
 	})
 
-	// Stamp the run chain so RunID/StepID resolve like a real formula step.
+	// Stamp the run chain so RunID resolves like a real formula step.
 	if err := store.SetMetadata(id, "molecule_id", "run-Z"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetMetadata(id, "gc.active_work_bead", "run-Z.step-1"); err != nil {
 		t.Fatal(err)
 	}
 	b, err := store.Get(id)
@@ -410,8 +407,8 @@ func TestFactorySweepSessionModelUsageClaude(t *testing.T) {
 		if f.Kind != usage.KindModel {
 			t.Fatalf("kind = %q, want model", f.Kind)
 		}
-		if f.RunID != "run-Z" || f.StepID != "run-Z.step-1" {
-			t.Fatalf("RunID/StepID = %q/%q, want run-Z/run-Z.step-1", f.RunID, f.StepID)
+		if f.RunID != "run-Z" || f.StepID != "" {
+			t.Fatalf("RunID/StepID = %q/%q, want run-Z/\"\" (run-level attribution)", f.RunID, f.StepID)
 		}
 		if f.Provider != "claude" {
 			t.Fatalf("Provider = %q, want claude", f.Provider)

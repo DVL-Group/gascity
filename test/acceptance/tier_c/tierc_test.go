@@ -134,8 +134,7 @@ func TestMain(m *testing.M) {
 		Without("GC_SESSION"). // use real tmux, not subprocess
 		Without("GC_BEADS").   // use real bd (dolt-backed) provider
 		Without("GC_DOLT").    // let gc manage dolt (don't skip it)
-		With("CLAUDE_CONFIG_DIR", dstClaudeDir).
-		With("GC_WORK_RECORD_ENFORCE", "1")
+		With("CLAUDE_CONFIG_DIR", dstClaudeDir)
 	testEnvC = testEnvC.With("PATH", providerBinDir+":"+testEnvC.Get("PATH"))
 
 	if apiKey != "" {

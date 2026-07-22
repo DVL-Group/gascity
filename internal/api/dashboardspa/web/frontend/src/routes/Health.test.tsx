@@ -351,6 +351,51 @@ describe('HealthPage', () => {
     expect(container.textContent).not.toMatch(/NaN|Infinity/);
   });
 
+  it('keeps the Host badge healthy when only the admin process telemetry is degraded', async () => {
+    currentHealth = {
+      ...baseHealth(),
+      admin: {
+        ...baseHealth().admin,
+        pid: 0,
+        uptime_sec: -1,
+        rss: { status: 'unavailable', reason: 'sample_failed' },
+        heap_used_bytes: -1,
+      },
+      // host telemetry is left fully valid: the Host badge must reflect the
+      // host, not the dashboard process.
+    };
+
+    renderPage();
+    await screen.findByRole('heading', { name: /host/i });
+
+    const hostSection = sectionFor('Host');
+    expect(hostSection).not.toBeNull();
+    expect(hostSection!.textContent).not.toContain('telemetry unavailable');
+
+    // Admin problems still surface in the Admin section, unchanged.
+    const adminSection = sectionFor('Admin process');
+    expect(adminSection).not.toBeNull();
+    expect(valueFor(adminSection!, 'PID')?.textContent).toBe('n/a');
+    expect(valueFor(adminSection!, 'Uptime')?.textContent).toBe('n/a');
+  });
+
+  it('treats a just-started host with zero uptime as available, not telemetry-unavailable', async () => {
+    currentHealth = {
+      ...baseHealth(),
+      host: {
+        ...baseHealth().host,
+        uptime: { status: 'available', value: 0 },
+      },
+    };
+
+    renderPage();
+    await screen.findByRole('heading', { name: /host/i });
+
+    const hostSection = sectionFor('Host');
+    expect(hostSection).not.toBeNull();
+    expect(hostSection!.textContent).not.toContain('telemetry unavailable');
+  });
+
   it('restores diagnostics from local probes plus the cached supervisor status', async () => {
     renderPage();
 

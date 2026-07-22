@@ -872,8 +872,7 @@ function hostStatus(h: SystemHealth): { tone: StatusTone; label: string } | unde
   if (
     memPct === null ||
     !hasValidHostComputeTelemetry(h) ||
-    !hasPositiveMetricValue(h.host.uptime) ||
-    !hasValidAdminTelemetry(h)
+    !hasNonNegativeMetricValue(h.host.uptime)
   ) {
     return { tone: 'warn', label: 'telemetry unavailable' };
   }
@@ -893,15 +892,6 @@ function hasValidHostComputeTelemetry(h: SystemHealth): boolean {
     isNonNegativeFinite(load.load_avg_1) &&
     isNonNegativeFinite(load.load_avg_5) &&
     isNonNegativeFinite(load.load_avg_15)
-  );
-}
-
-function hasValidAdminTelemetry(h: SystemHealth): boolean {
-  return (
-    isPositiveInteger(h.admin.pid) &&
-    isPositiveFinite(h.admin.uptime_sec) &&
-    hasPositiveMetricValue(h.admin.rss) &&
-    isPositiveFinite(h.admin.heap_used_bytes)
   );
 }
 
@@ -952,6 +942,10 @@ function loadAverage1(h: SystemHealth): number {
 
 function hasPositiveMetricValue(metric: HealthMetric<number>): boolean {
   return metric.status === 'available' && isPositiveFinite(metric.value);
+}
+
+function hasNonNegativeMetricValue(metric: HealthMetric<number>): boolean {
+  return metric.status === 'available' && isNonNegativeFinite(metric.value);
 }
 
 function formatHealthMetricDuration(metric: HealthMetric<number>): string {

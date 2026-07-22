@@ -235,17 +235,25 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot s
 	return block
 }
 
+// workRecordMetadataEdits is the parsed metadata mutation of a `bd update` arg
+// list: either a whole-object --metadata merge (hasMetadataJSON) or a set of
+// --set-metadata / --unset-metadata edits. The two forms are mutually exclusive
+// in bd; applyWorkRecordMetadataEdits enforces that.
+type workRecordMetadataEdits struct {
+	metadataJSON    string
+	hasMetadataJSON bool
+	setMetadata     []string
+	unsetMetadata   []string
+}
+
 // applyWorkRecordUpdateMetadata overlays metadata mutations from an atomic
 // `bd update ... --status=closed` invocation onto the stored bead before the
 // close gate validates it. The documented worker close form stamps the typed
 // work record and closes in one update, so validating only the pre-update bead
 // would reject a valid enforced close and warn incorrectly in migration mode.
 //
-// Match bd's update flag semantics exactly: --metadata is a scalar whose last
-// occurrence wins, it cannot be combined with the edit flags, and bd applies
-// every --set-metadata edit before every --unset-metadata edit regardless of
-// their order in argv. A more permissive projection could validate prospective
-// metadata that bd never persists and allow an invalid close.
+// The parse and apply phases are split so neither carries the whole projection's
+// branch density; together they match bd's update flag semantics exactly.
 func applyWorkRecordUpdateMetadata(bead beads.Bead, bdArgs []string) (beads.Bead, error) {
 	if len(bdArgs) == 0 || bdArgs[0] != "update" {
 		return bead, nil
@@ -255,14 +263,24 @@ func applyWorkRecordUpdateMetadata(bead beads.Bead, bdArgs []string) (beads.Bead
 		metadata[key] = value
 	}
 	bead.Metadata = metadata
-	valueFlags := bdSubcmdValueFlags("update")
-	var (
-		metadataJSON    string
-		hasMetadataJSON bool
-		setMetadata     []string
-		unsetMetadata   []string
-	)
+	edits, err := parseWorkRecordMetadataEdits(bdArgs)
+	if err != nil {
+		return bead, err
+	}
+	if err := applyWorkRecordMetadataEdits(bead.Metadata, edits); err != nil {
+		return bead, err
+	}
+	return bead, nil
+}
 
+// parseWorkRecordMetadataEdits extracts the metadata mutations from a `bd update`
+// arg list, matching bd's flag semantics: --metadata is a scalar whose last
+// occurrence wins, and every known update flag's separate value is consumed so a
+// value that itself looks like a metadata flag never mutates the prospective
+// record. `--` terminates flag parsing.
+func parseWorkRecordMetadataEdits(bdArgs []string) (workRecordMetadataEdits, error) {
+	valueFlags := bdSubcmdValueFlags("update")
+	var edits workRecordMetadataEdits
 	for i := 1; i < len(bdArgs); i++ {
 		arg := bdArgs[i]
 		switch {
@@ -270,60 +288,66 @@ func applyWorkRecordUpdateMetadata(bead beads.Bead, bdArgs []string) (beads.Bead
 			i = len(bdArgs)
 		case arg == "--metadata":
 			if i+1 >= len(bdArgs) {
-				return bead, fmt.Errorf("cannot project --metadata: missing JSON value")
+				return edits, fmt.Errorf("cannot project --metadata: missing JSON value")
 			}
 			i++
-			metadataJSON = bdArgs[i]
-			hasMetadataJSON = true
+			edits.metadataJSON = bdArgs[i]
+			edits.hasMetadataJSON = true
 		case strings.HasPrefix(arg, "--metadata="):
-			metadataJSON = strings.TrimPrefix(arg, "--metadata=")
-			hasMetadataJSON = true
+			edits.metadataJSON = strings.TrimPrefix(arg, "--metadata=")
+			edits.hasMetadataJSON = true
 		case arg == "--set-metadata":
 			if i+1 >= len(bdArgs) {
-				return bead, fmt.Errorf("cannot project --set-metadata: missing key=value")
+				return edits, fmt.Errorf("cannot project --set-metadata: missing key=value")
 			}
 			i++
-			setMetadata = append(setMetadata, bdArgs[i])
+			edits.setMetadata = append(edits.setMetadata, bdArgs[i])
 		case strings.HasPrefix(arg, "--set-metadata="):
-			setMetadata = append(setMetadata, strings.TrimPrefix(arg, "--set-metadata="))
+			edits.setMetadata = append(edits.setMetadata, strings.TrimPrefix(arg, "--set-metadata="))
 		case arg == "--unset-metadata":
 			if i+1 >= len(bdArgs) {
-				return bead, fmt.Errorf("cannot project --unset-metadata: missing key")
+				return edits, fmt.Errorf("cannot project --unset-metadata: missing key")
 			}
 			i++
-			unsetMetadata = append(unsetMetadata, bdArgs[i])
+			edits.unsetMetadata = append(edits.unsetMetadata, bdArgs[i])
 		case strings.HasPrefix(arg, "--unset-metadata="):
-			unsetMetadata = append(unsetMetadata, strings.TrimPrefix(arg, "--unset-metadata="))
+			edits.unsetMetadata = append(edits.unsetMetadata, strings.TrimPrefix(arg, "--unset-metadata="))
 		case !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(bdArgs):
-			// A value may itself look like a metadata flag. Consume every known
-			// update flag's separate value so only real flag positions mutate
-			// the prospective work record.
 			i++
 		}
 	}
-	if hasMetadataJSON && (len(setMetadata) > 0 || len(unsetMetadata) > 0) {
-		return bead, fmt.Errorf("cannot project metadata: --metadata cannot be combined with --set-metadata or --unset-metadata")
+	return edits, nil
+}
+
+// applyWorkRecordMetadataEdits overlays parsed edits onto metadata, matching bd:
+// --metadata cannot be combined with the edit flags, and bd applies every
+// --set-metadata edit before every --unset-metadata edit regardless of their
+// order in argv. A more permissive projection could validate prospective
+// metadata that bd never persists and allow an invalid close.
+func applyWorkRecordMetadataEdits(metadata beads.StringMap, edits workRecordMetadataEdits) error {
+	if edits.hasMetadataJSON && (len(edits.setMetadata) > 0 || len(edits.unsetMetadata) > 0) {
+		return fmt.Errorf("cannot project metadata: --metadata cannot be combined with --set-metadata or --unset-metadata")
 	}
-	if hasMetadataJSON {
-		if err := mergeWorkRecordMetadataJSON(bead.Metadata, metadataJSON); err != nil {
-			return bead, fmt.Errorf("cannot project --metadata: %w", err)
+	if edits.hasMetadataJSON {
+		if err := mergeWorkRecordMetadataJSON(metadata, edits.metadataJSON); err != nil {
+			return fmt.Errorf("cannot project --metadata: %w", err)
 		}
-		return bead, nil
+		return nil
 	}
-	for _, edit := range setMetadata {
+	for _, edit := range edits.setMetadata {
 		key, value, ok := strings.Cut(edit, "=")
 		if !ok || key == "" {
-			return bead, fmt.Errorf("cannot project --set-metadata %q: expected key=value", edit)
+			return fmt.Errorf("cannot project --set-metadata %q: expected key=value", edit)
 		}
-		bead.Metadata[key] = value
+		metadata[key] = value
 	}
-	for _, key := range unsetMetadata {
+	for _, key := range edits.unsetMetadata {
 		if key == "" {
-			return bead, fmt.Errorf("cannot project --unset-metadata: key is empty")
+			return fmt.Errorf("cannot project --unset-metadata: key is empty")
 		}
-		delete(bead.Metadata, key)
+		delete(metadata, key)
 	}
-	return bead, nil
+	return nil
 }
 
 // mergeWorkRecordMetadataJSON applies bd update's --metadata object as an

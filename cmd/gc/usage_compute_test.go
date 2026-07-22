@@ -71,12 +71,11 @@ func TestEmitComputeFactForBead(t *testing.T) {
 	b, err := store.Create(beads.Bead{
 		Title: "session",
 		Metadata: map[string]string{
-			"state":               "asleep",
-			"session_name":        "s-x",
-			"awake_started_at":    start.Format(time.RFC3339),
-			"slept_at":            slept.Format(time.RFC3339),
-			"molecule_id":         "mol-7",
-			"gc.active_work_bead": "mol.finalize", // the step the session was on; cleared at this terminal pass
+			"state":            "asleep",
+			"session_name":     "s-x",
+			"awake_started_at": start.Format(time.RFC3339),
+			"slept_at":         slept.Format(time.RFC3339),
+			"molecule_id":      "mol-7",
 		},
 	})
 	if err != nil {
@@ -117,11 +116,6 @@ func TestEmitComputeFactForBead(t *testing.T) {
 	refreshed, err := store.Get(b.ID)
 	if err != nil {
 		t.Fatal(err)
-	}
-	// The terminal pass also CLEARS the active-work-bead pointer, so an idle
-	// invocation after this work attributes at run level (StepID="") not the old step.
-	if got := refreshed.Metadata["gc.active_work_bead"]; got != "" {
-		t.Fatalf("gc.active_work_bead = %q, want cleared (\"\") at the terminal pass", got)
 	}
 	if emitComputeFactForBead(context.Background(), sink, store, refreshed, "fake", "demo", now, nil, true) {
 		t.Fatal("second emit on same interval must no-op (marker set)")
@@ -351,16 +345,15 @@ func TestEmitDueComputeFactsAlsoSweepsModelUsage(t *testing.T) {
 		Title:  "codex session",
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"state":               "asleep",
-			"session_name":        "codex-1",
-			"awake_started_at":    start.Format(time.RFC3339),
-			"slept_at":            slept.Format(time.RFC3339),
-			"session_key":         sessionKey,
-			"work_dir":            workDir,
-			"provider":            "mc-codex-wrap", // wrapped manifold name
-			"builtin_ancestor":    "codex",         // canonical ladder resolves this to codex
-			"molecule_id":         "run-Z",
-			"gc.active_work_bead": "run-Z.step-1",
+			"state":            "asleep",
+			"session_name":     "codex-1",
+			"awake_started_at": start.Format(time.RFC3339),
+			"slept_at":         slept.Format(time.RFC3339),
+			"session_key":      sessionKey,
+			"work_dir":         workDir,
+			"provider":         "mc-codex-wrap", // wrapped manifold name
+			"builtin_ancestor": "codex",         // canonical ladder resolves this to codex
+			"molecule_id":      "run-Z",
 		},
 	})
 	if err != nil {
@@ -407,8 +400,8 @@ func TestEmitDueComputeFactsAlsoSweepsModelUsage(t *testing.T) {
 			continue
 		}
 		seen[fmt.Sprintf("%d/%d", f.InputTokens, f.OutputTokens)] = true
-		if f.StepID != "run-Z.step-1" {
-			t.Fatalf("model fact StepID = %q, want run-Z.step-1 (the interval's active work bead)", f.StepID)
+		if f.StepID != "" {
+			t.Fatalf("model fact StepID = %q, want empty (run-level attribution)", f.StepID)
 		}
 		if f.Provider != "codex" {
 			t.Fatalf("model fact Provider = %q, want codex (wrapped name resolved via builtin_ancestor)", f.Provider)
@@ -464,16 +457,15 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 		Title:  "codex session",
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
-			"state":               "asleep",
-			"session_name":        "codex-1",
-			"awake_started_at":    start.Format(time.RFC3339),
-			"slept_at":            slept.Format(time.RFC3339),
-			"session_key":         sessionKey,
-			"work_dir":            workDir,
-			"provider":            "codex",
-			"builtin_ancestor":    "codex",
-			"molecule_id":         "run-Z",
-			"gc.active_work_bead": "run-Z.step-1",
+			"state":            "asleep",
+			"session_name":     "codex-1",
+			"awake_started_at": start.Format(time.RFC3339),
+			"slept_at":         slept.Format(time.RFC3339),
+			"session_key":      sessionKey,
+			"work_dir":         workDir,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-Z",
 		},
 	})
 	if err != nil {

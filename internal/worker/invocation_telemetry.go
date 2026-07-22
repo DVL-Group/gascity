@@ -213,9 +213,9 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // run's model and compute facts carry the same RunID and group together in
 // gc costs. The session bead id is carried verbatim as SessionID (the join key to
 // the manifold spend plane's EIA session_id and to recall transcripts), distinct
-// from the resolved RunID and from Worker (the session name). StepID carries the
-// session's gc.active_work_bead when present, and is empty only for ad-hoc,
-// manual, or idle sessions. The dedup identity is the invocation's provider message id (or the
+// from the resolved RunID and from Worker (the session name). StepID is left
+// unset: model usage is attributed at run level, not per formula step (see the
+// StepID note in the body). The dedup identity is the invocation's provider message id (or the
 // transcript entry uuid when none), so the best-effort cursor races noted on
 // recordInvocationTelemetry collapse a re-recorded invocation to one fact at the
 // sink via IdempotencyKey. Unpriced is true exactly when the pricing registry
@@ -228,19 +228,19 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 	// handle's currentSessionID == the session bead id); the params stay distinct
 	// so the run-chain precedence contract is preserved verbatim.
 	runID := beadmeta.ResolveRunID(meta, beadID, sessionID)
-	// The run STEP: the session's current work bead's gc.step_id, stamped at the claim
-	// hook (gc.active_work_bead). Read from the SAME session-bead snapshot as runID so
-	// StepID always names a step under this RunID. Empty when the session isn't on a
-	// formula work bead (ad-hoc/manual/idle) — run-level attribution, matching events.
-	stepID := strings.TrimSpace(meta[beadmeta.ActiveWorkBeadMetadataKey])
+	// Model usage is attributed at run level: StepID stays unset. Per-step
+	// attribution was retired along with the gc.active_work_bead session pointer —
+	// the claim hook no longer stamps it (that was an unsafe fuzzy session-bead
+	// write), so no production source names the current step. Compute facts are
+	// already run-level, so both usage Kinds now roll up per run, matching events.
 	reqID := usageIdentity(u)
 	if !priced {
 		cost = 0
 	}
 	return usage.Fact{
-		RunID:               runID,
-		SessionID:           strings.TrimSpace(sessionID),
-		StepID:              stepID,
+		RunID:     runID,
+		SessionID: strings.TrimSpace(sessionID),
+		// StepID intentionally unset — run-level attribution (see body note).
 		Worker:              strings.TrimSpace(worker),
 		Kind:                usage.KindModel,
 		Model:               strings.TrimSpace(u.Model),
@@ -460,7 +460,7 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 //
 // Overlap with the prompt-op seam is safe: both stamp usage.ModelIdempotencyKey,
 // which usage.ReadFacts collapses, so an invocation recorded by both beats folds
-// to one fact. meta is the fresh session-bead metadata (RunID/StepID resolution,
+// to one fact. meta is the fresh session-bead metadata (RunID resolution,
 // the session_key, work dir, and cursor all read from it), and now stamps the
 // emitted facts.
 func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta map[string]string, now time.Time) (emitted int, settled bool, err error) {
