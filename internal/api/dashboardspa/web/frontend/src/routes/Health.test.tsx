@@ -287,6 +287,29 @@ describe('HealthPage', () => {
     expect(container.textContent).not.toContain('0 B of 0 B');
   });
 
+  it('renders an available zero-denominator memory sample as unavailable', async () => {
+    currentHealth = {
+      ...baseHealth(),
+      host: {
+        ...baseHealth().host,
+        memory: {
+          status: 'available',
+          value: { total_mem_bytes: 0, free_mem_bytes: 0 },
+        },
+      },
+    };
+
+    const { container } = renderPage();
+    await screen.findByRole('heading', { name: /host/i });
+
+    const heading = screen.getByRole('heading', { name: /^health$/i });
+    const synopsis = synopsisFor(heading)?.textContent ?? '';
+    expect(synopsis).toContain('Memory unavailable');
+    expect(valueFor(container, 'Memory free')?.textContent).toBe('n/a');
+    expect(container.textContent).not.toMatch(/NaN|Infinity/);
+    expect(container.textContent).not.toContain('0 B of 0 B');
+  });
+
   it('contains malformed CPU, load, and admin metrics at the display boundary', async () => {
     currentHealth = {
       ...baseHealth(),
