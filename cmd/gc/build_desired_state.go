@@ -2830,23 +2830,22 @@ func computePoolTriggerBindingPatch(info session.Info, request SessionRequest, w
 	// preserve the recorded path. A live resume-mode session can also claim a
 	// retry bead without restarting; in that case the process remains in its
 	// existing cwd even though the trigger changes. The concrete session id and
-	// durable current-bead marker distinguish that continuation from an asleep,
+	// active lifecycle state distinguish that continuation from an asleep,
 	// fresh, or otherwise reusable session that will start in a newly derived
-	// worktree.
+	// worktree. currently_processing_bead_id is deliberately not required here:
+	// that secondary marker can lag the live process and must not authorize a cwd
+	// metadata rewrite while the process is still running.
 	if workDir != "" {
 		targetWorkDir := workDir
 		existingWorkDir := strings.TrimSpace(info.WorkDirCanonical)
 		if existingWorkDir == "" {
 			existingWorkDir = strings.TrimSpace(info.WorkDir)
 		}
-		currentWorkBeadID := strings.TrimSpace(info.CurrentlyProcessingBeadID)
 		liveResumeContinuation := oldWorkBeadID != workBeadID &&
 			request.Tier == "resume" &&
 			request.SessionBeadID == info.ID &&
 			info.State == session.StateActive &&
-			info.WakeMode != "fresh" &&
-			currentWorkBeadID != "" &&
-			(currentWorkBeadID == oldWorkBeadID || currentWorkBeadID == workBeadID)
+			info.WakeMode != "fresh"
 		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation) {
 			targetWorkDir = existingWorkDir
 		}

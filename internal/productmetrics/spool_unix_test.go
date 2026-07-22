@@ -4657,27 +4657,37 @@ func TestPurgeSpoolConvergesWhenMalformedNestingExceedsDirectoryBudget(t *testin
 	}
 }
 
-const deepSpoolFixtureDepth = 192
+const (
+	lowNOFILESpoolFixtureDepth     = 192
+	defaultBudgetSpoolFixtureDepth = int(maximumCleanupDirectories/2) + 1
+)
 
-func deepSpoolFixturePath(base string) string {
-	for range deepSpoolFixtureDepth {
+func deepSpoolFixturePath(base string, depth int) string {
+	for range depth {
 		base = filepath.Join(base, "d")
 	}
 	return base
 }
 
 func TestDeepSpoolFixtureGeometryFitsMacOSPathBudget(t *testing.T) {
-	if deepSpoolFixtureDepth <= 128 {
-		t.Fatalf("deep fixture depth = %d, must exceed the low-NOFILE limit", deepSpoolFixtureDepth)
+	if lowNOFILESpoolFixtureDepth <= 128 {
+		t.Fatalf("low-NOFILE fixture depth = %d, must exceed the descriptor limit", lowNOFILESpoolFixtureDepth)
 	}
-	if uint64(deepSpoolFixtureDepth) <= spoolMinimumDirectoryProgress {
-		t.Fatalf("deep fixture depth = %d, must exceed the minimum directory-progress batch %d", deepSpoolFixtureDepth, spoolMinimumDirectoryProgress)
+	if uint64(lowNOFILESpoolFixtureDepth) <= spoolMinimumDirectoryProgress {
+		t.Fatalf("low-NOFILE fixture depth = %d, must exceed the minimum directory-progress batch %d", lowNOFILESpoolFixtureDepth, spoolMinimumDirectoryProgress)
+	}
+	// The collision walk opens each nested segment once for enumeration and
+	// once for descent. Keep a distinct fixture that crosses the default
+	// directory-open budget; the 192-level fixture above owns low-NOFILE depth.
+	physicalDirectoryOpens := uint64(defaultBudgetSpoolFixtureDepth) * 2
+	if physicalDirectoryOpens <= maximumCleanupDirectories {
+		t.Fatalf("default-budget fixture creates %d physical directory opens, must exceed cleanup budget %d", physicalDirectoryOpens, maximumCleanupDirectories)
 	}
 
 	// Leave a deliberately generous 384-byte allowance for the macOS temp-root
 	// prefix and the product-metrics tree above the repeated fixture segments.
 	const macOSPathLimit = 1024
-	deepest := filepath.Join(deepSpoolFixturePath(strings.Repeat("x", 384)), "outside-link")
+	deepest := filepath.Join(deepSpoolFixturePath(strings.Repeat("x", 384), defaultBudgetSpoolFixtureDepth), "outside-link")
 	if len(deepest) >= macOSPathLimit {
 		t.Fatalf("deep fixture path uses %d bytes, must stay below macOS PATH_MAX %d", len(deepest), macOSPathLimit)
 	}
@@ -5643,7 +5653,7 @@ func newQuarantineCollisionFixture(t *testing.T, kind string) *quarantineCollisi
 		t.Fatal(err)
 	}
 	if kind == "deep-directory" || kind == "lax-deep-directory" {
-		path := deepSpoolFixturePath(blockerPath)
+		path := deepSpoolFixturePath(blockerPath, defaultBudgetSpoolFixtureDepth)
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -8087,7 +8097,7 @@ func TestSpoolDeepPurgeConvergesUnderLowFileDescriptorLimit(t *testing.T) {
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	deep = deepSpoolFixturePath(deep)
+	deep = deepSpoolFixturePath(deep, lowNOFILESpoolFixtureDepth)
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Fatal(err)
 	}

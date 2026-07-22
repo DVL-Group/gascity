@@ -110,10 +110,10 @@ func TestBindPoolSessionTriggerBeadUsesExplicitWorkspace(t *testing.T) {
 	}
 }
 
-// TestAssignedPoolResumeRebindUsesConfiguredBase verifies that rebinding a
-// non-pack worker repairs a legacy trigger-slug workdir instead of deriving a
-// new slug from the assigned work bead's title.
-func TestAssignedPoolResumeRebindUsesConfiguredBase(t *testing.T) {
+// TestAssignedActivePoolResumePreservesConcreteWorkDir verifies that rebinding
+// an already-running worker cannot rewrite the recorded cwd out from under the
+// live process, even when the currently-processing marker has not caught up.
+func TestAssignedActivePoolResumePreservesConcreteWorkDir(t *testing.T) {
 	const (
 		assignedWorkID  = "fi-kar"
 		assignedTitle   = "Implement owned work"
@@ -134,7 +134,6 @@ func TestAssignedPoolResumeRebindUsesConfiguredBase(t *testing.T) {
 	store := beads.NewMemStore()
 	bp := newAgentBuildParams("fixture", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
 	base := filepath.Join(bp.cityPath, ".gc", "workspaces", "worker")
-	launcherWorkDir := base
 	transientWorkDir := filepath.Join(base, "fi-43h-implement-owned-work")
 
 	created, err := store.Create(beads.Bead{
@@ -192,11 +191,36 @@ func TestAssignedPoolResumeRebindUsesConfiguredBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind assigned work: %v", err)
 	}
-	if got := rebound.WorkDirCanonical; got != launcherWorkDir {
-		t.Errorf("resume gc.work_dir = %q, want launcher cwd %q", got, launcherWorkDir)
+	if got := rebound.WorkDirCanonical; got != transientWorkDir {
+		t.Errorf("active resume gc.work_dir = %q, want live process cwd %q", got, transientWorkDir)
 	}
-	if got := rebound.WorkDir; got != launcherWorkDir {
-		t.Errorf("resume work_dir = %q, want launcher cwd %q", got, launcherWorkDir)
+	if got := rebound.WorkDir; got != transientWorkDir {
+		t.Errorf("active resume work_dir = %q, want live process cwd %q", got, transientWorkDir)
+	}
+}
+
+func TestComputePoolTriggerBindingPatchAsleepResumeUsesConfiguredBase(t *testing.T) {
+	legacyWorkDir := filepath.Join("legacy", "fi-old-title")
+	configuredBase := filepath.Join("integration", "worker")
+	info := session.Info{
+		ID:               "sess-1",
+		State:            session.StateAsleep,
+		TriggerBeadID:    "fi-old",
+		WorkDirCanonical: legacyWorkDir,
+		WorkDir:          legacyWorkDir,
+	}
+	request := SessionRequest{
+		Tier:          "resume",
+		SessionBeadID: "sess-1",
+		WorkBeadID:    "fi-new",
+	}
+
+	patch := computePoolTriggerBindingPatch(info, request, configuredBase)
+	if got := patch[beadmeta.WorkDirMetadataKey]; got != configuredBase {
+		t.Errorf("asleep resume gc.work_dir patch = %q, want configured base %q", got, configuredBase)
+	}
+	if got := patch[beadmeta.LegacyWorkDirMetadataKey]; got != configuredBase {
+		t.Errorf("asleep resume work_dir patch = %q, want configured base %q", got, configuredBase)
 	}
 }
 
