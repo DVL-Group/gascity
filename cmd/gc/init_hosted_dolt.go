@@ -225,7 +225,7 @@ func applyInitHostedDoltCanonicalConfig(fs fsys.FS, cityPath, issuePrefix string
 	if err := contract.WriteProjectIdentity(fs, cityPath, strings.TrimSpace(opts.ProjectID)); err != nil {
 		return fmt.Errorf("writing project identity: %w", err)
 	}
-	if err := ensureCanonicalScopeConfigState(fs, cityPath, opts.configState(issuePrefix)); err != nil {
+	if err := ensureCanonicalScopeConfigState(fs, cityPath, cityPath, opts.configState(issuePrefix)); err != nil {
 		return fmt.Errorf("writing canonical endpoint config: %w", err)
 	}
 	if err := enforceCanonicalScopeMetadataForInit(fs, cityPath, strings.TrimSpace(opts.Database)); err != nil {

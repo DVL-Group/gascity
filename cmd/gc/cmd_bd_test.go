@@ -812,6 +812,10 @@ esac
 
 func TestGcBdReapsStaleBdExportJSONLBeforeDirectCommand(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
+	// Managed scope, hydrated (row-count>0), untracked export: reap runs before
+	// the direct command. Seam A gate stubbed to the "safe to delete" branch so
+	// the probe does not depend on the fake bd script satisfying a store List.
+	stubJSONLDeletionSeams(t, false /*tracked*/, true /*hasRows*/, true /*ok*/)
 
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag

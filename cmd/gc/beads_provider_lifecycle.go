@@ -150,6 +150,12 @@ var (
 	initDirIfReadyInitAndHookDir      = initAndHookDir
 	initDirIfReadyWaitForManagedDolt  = waitForManagedDoltInitReady
 	initAndHookDirWaitForScopeReady   = waitForBeadsScopeReadyAfterRecovery
+	// Seam A (dac-y7mg.1): the hydrate→normalize steps of initAndHookDir are
+	// indirected so tests can assert their order (hydrate strictly first) and
+	// the fail-closed invariant (a hydration error returns before the reaping
+	// config-sync ever runs). Same seam idiom as the vars above.
+	initAndHookDirInitBeads           = initBeadsForDir
+	initAndHookDirNormalizeScopeFiles = normalizeCanonicalBdScopeFilesForInit
 )
 
 func isRetryableManagedDoltLifecycleError(err error) bool {
@@ -383,7 +389,7 @@ func desiredScopeDoltConfigStateForInit(cityPath, dir, prefix string) (contract.
 }
 
 //nolint:unparam // keep fs seam for future testable FS injection
-func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.ConfigState) error {
+func ensureCanonicalScopeConfigState(fs fsys.FS, dir, cityPath string, state contract.ConfigState) error {
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := ensureBeadsDir(fs, beadsDir); err != nil {
 		return err
@@ -406,8 +412,10 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 		// subprocess timeout while it re-imports the JSONL. The file is a
 		// stale export from when auto-export was on; with the canonical
 		// config now suppressing auto-export, nothing will refresh it. Explicit
-		// opt-out scopes keep JSONL as load-bearing state.
-		removeStaleBdExportJSONL(fs, beadsDir)
+		// opt-out scopes keep JSONL as load-bearing state. The Seam A gate inside
+		// removeStaleBdExportJSONL additionally preserves a git-tracked or
+		// not-yet-hydrated export even under a managed origin.
+		removeStaleBdExportJSONL(fs, dir, cityPath)
 	}
 	return nil
 }
@@ -418,9 +426,16 @@ func ensureCanonicalScopeConfigState(fs fsys.FS, dir string, state contract.Conf
 // stalling bd create for the full subprocess timeout on large datasets.
 // Best-effort: any error is non-fatal because the env-var BD_EXPORT_AUTO=false
 // path (bdRuntimeEnv) is a second line of defense for gc-initiated calls.
-func removeStaleBdExportJSONL(fs fsys.FS, beadsDir string) {
-	path := filepath.Join(beadsDir, "issues.jsonl")
+//
+// Seam A (dac-y7mg.1): the export is preserved when it is git-tracked or when
+// the scope's managed Dolt is empty/unprovable (jsonlDeletionAllowed), so a
+// freshly-adopted tracked mirror is never reaped before hydration.
+func removeStaleBdExportJSONL(fs fsys.FS, scopeRoot, cityPath string) {
+	path := filepath.Join(scopeRoot, ".beads", "issues.jsonl")
 	if _, err := fs.Stat(path); err != nil {
+		return
+	}
+	if !jsonlDeletionAllowed(scopeRoot, cityPath) {
 		return
 	}
 	_ = fs.Remove(path)
@@ -439,7 +454,7 @@ func seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase string) err
 	if state, ok, err := desiredScopeDoltConfigStateForInit(cityPath, dir, prefix); err != nil {
 		return err
 	} else if ok {
-		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, state); err != nil {
+		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, cityPath, state); err != nil {
 			return err
 		}
 	}
@@ -493,7 +508,7 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 	if state, ok, err := desiredScopeDoltConfigStateForInit(cityPath, dir, prefix); err != nil {
 		return err
 	} else if ok {
-		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, state); err != nil {
+		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, cityPath, state); err != nil {
 			return err
 		}
 	}
@@ -524,13 +539,21 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		return nil
 	}
 	doltDatabase := canonicalScopeDoltDatabase(cityPath, dir, prefix)
-	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
+	// Seam A (dac-y7mg.1 / spike 002 §4): hydrate the scope's managed Dolt
+	// BEFORE any canonical config-sync/reap. initBeadsForDir runs `bd init`,
+	// which auto-imports a surviving .beads/issues.jsonl into the empty managed
+	// database. This funnel previously ran normalizeCanonicalBdScopeFilesForInit
+	// FIRST; that config-sync writes export.auto:false and reaps the JSONL,
+	// deleting the only copy of the issues before init could import it — the
+	// dac-75f3 89→0 wipe. Init-first is also fail-closed: a hydration error
+	// returns here with the tracked JSONL untouched, never falling through to
+	// config-sync/reap. The post-init normalize re-asserts the canonical config
+	// (bd init may recreate .beads/); its reap is additionally gated by
+	// jsonlDeletionAllowed, so a git-tracked or not-yet-hydrated mirror survives.
+	if err := initAndHookDirInitBeads(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
 	}
-	if err := initBeadsForDir(cityPath, dir, prefix, doltDatabase); err != nil {
-		return err
-	}
-	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
+	if err := initAndHookDirNormalizeScopeFiles(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
 	}
 	if cityUsesBdStoreContract(cityPath) && currentResolvableManagedDoltPort(cityPath) != "" {
@@ -980,7 +1003,7 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	if state, ok, err := forcedScopeDoltConfigStateForInit(cityPath, dir, prefix); err != nil {
 		return err
 	} else if ok {
-		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, state); err != nil {
+		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, cityPath, state); err != nil {
 			return err
 		}
 	}
@@ -1667,7 +1690,7 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		managedPort = currentDoltPort(cityPath)
 	}
 	if cityUsesBd {
-		if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
+		if err := normalizeScopeDoltConfig(cityPath, cityPath, cityState); err != nil {
 			return err
 		}
 		if !cityUsesPostgres {
@@ -1698,7 +1721,7 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && rigState.EndpointOrigin == contract.EndpointOriginInheritedCity {
 			rigManagedPort = managedPort
 		}
-		if err := normalizeScopeDoltConfig(rig.Path, rigState); err != nil {
+		if err := normalizeScopeDoltConfig(rig.Path, cityPath, rigState); err != nil {
 			return err
 		}
 		if rigManagedPort != "" {
@@ -1933,8 +1956,8 @@ func inheritedEndpointStatus(_ string, _ contract.ConfigState, inherited contrac
 	return inherited
 }
 
-func normalizeScopeDoltConfig(dir string, state contract.ConfigState) error {
-	return ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, state)
+func normalizeScopeDoltConfig(dir, cityPath string, state contract.ConfigState) error {
+	return ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, cityPath, state)
 }
 
 // runProviderProbe runs a "probe" operation against an exec beads script.

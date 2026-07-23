@@ -167,6 +167,74 @@ If you want a true cross-rig view, query Dolt directly using the port from
 `my-city/.beads/dolt-server.port`. The `bd` CLI is intentionally not the tool
 for that — its job is to enforce per-scope namespacing.
 
+## Adopting a repo that ships a tracked `issues.jsonl`
+
+A repository can arrive already carrying its own Beads store: a committed
+`.beads/` with `metadata.json`, `config.yaml`, and a git-tracked
+`issues.jsonl` — the JSON-lines export that is the repo's portable,
+version-controlled record of its issues. `gc rig add --adopt` registers such a
+repo as a rig without losing that data.
+
+### Hydrate before normalize
+
+Adoption is **lossless by construction**. `gc rig add --adopt` runs the
+scope's `bd init` — which imports a surviving `issues.jsonl` into the
+(initially empty) managed Dolt database — **before** it runs the canonical
+config sync that would otherwise reap the export. Hydrating first means the
+rows are safely in Dolt before anything is allowed to delete the file. If the
+import fails, adopt aborts **fail-closed** with the tracked `issues.jsonl`
+untouched; it never falls through to the config sync.
+
+### The reaping guard
+
+gc normally deletes a scope's `issues.jsonl` once the store is managed: with
+`export.auto:false` the file is a stale export that bd would otherwise
+re-import on every write, stalling `bd create` for minutes (`sa-41j3kp`). Two
+deleters implement that cleanup — `removeStaleBdExportJSONL` (config sync) and
+`reapStaleBdExportJSONL` (every managed store open). Both refuse to delete an
+`issues.jsonl` that is either:
+
+- **git `ls-files`-tracked** — a committed mirror is a source of truth, not a
+  regenerable cache; or
+- **backed by an empty or unreachable managed Dolt** (row-count 0 or
+  unprovable) — the file may be the only surviving copy.
+
+So a git-tracked mirror survives adoption byte-for-byte, and re-adopting an
+already-hydrated store is idempotent — never a re-wipe.
+
+### Mirror semantics under `BD_EXPORT_AUTO=false`
+
+Because gc sets `BD_EXPORT_AUTO=false` for every managed `bd` call, bd will
+**not** auto-refresh the committed `issues.jsonl` after adoption. The file is
+therefore a **point-in-time snapshot**, not a live mirror: subsequent
+`gc bd`/agent writes land in Dolt only, and the committed JSONL drifts until it
+is deliberately re-exported.
+
+Keeping the committed mirror in sync is a **manual, explicit contract** — gc
+deliberately ships no export-on-close hook, so a managed store never silently
+rewrites the repo's working tree. Two supported models:
+
+- **Managed rig (default).** Dolt is the source of truth; the tracked
+  `issues.jsonl` is preserved but goes stale. To refresh the committed mirror
+  — for a portable snapshot, an offline diff, or a hand-off — export
+  explicitly and commit the result:
+
+  ```
+  cd <rig>
+  bd export -o .beads/issues.jsonl        # add --all to include infra/templates
+  git add .beads/issues.jsonl && git commit
+  ```
+
+  (`gc bd --rig <name> export -o .beads/issues.jsonl` forwards to the same
+  `bd export`.)
+
+- **JSONL-of-record coexistence (`explicit` origin).** A scope that sets
+  `gc.endpoint_origin: explicit` in `.beads/config.yaml` opts out of managed
+  reaping entirely: its `issues.jsonl` stays load-bearing, and adoption
+  **preserves** that origin rather than overwriting it with a managed one. Use
+  this when the committed JSONL — not the managed Dolt — is meant to remain the
+  durable record.
+
 ## Going further
 
 - [`bd` CLI](https://github.com/gastownhall/beads) — upstream documentation for
