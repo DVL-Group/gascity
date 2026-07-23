@@ -38,6 +38,33 @@ func (g *Git) IsRepoCtx(ctx context.Context) bool {
 	return err == nil
 }
 
+// IsTracked reports whether relPath (relative to the worktree root) is a file
+// tracked in git's index. Returns false when the path is untracked, ignored,
+// absent, or when workDir is not inside a git repository. Uses `git ls-files
+// --error-unmatch`, which exits non-zero precisely when the pathspec matches
+// no tracked file.
+func (g *Git) IsTracked(relPath string) bool {
+	return g.IsTrackedCtx(context.Background(), relPath)
+}
+
+// IsTrackedCtx is like IsTracked but accepts a context for cancellation.
+func (g *Git) IsTrackedCtx(ctx context.Context, relPath string) bool {
+	_, err := g.runCtx(ctx, "ls-files", "--error-unmatch", "--", relPath)
+	return err == nil
+}
+
+// Init runs `git init` in workDir, creating a fresh repository there.
+func (g *Git) Init() error {
+	_, err := g.run("init")
+	return err
+}
+
+// Add stages the given paths (relative to the worktree root) in git's index.
+func (g *Git) Add(paths ...string) error {
+	_, err := g.run(append([]string{"add", "--"}, paths...)...)
+	return err
+}
+
 // CurrentBranch returns the current branch name. Returns "HEAD" if detached.
 func (g *Git) CurrentBranch() (string, error) {
 	return g.CurrentBranchCtx(context.Background())

@@ -219,7 +219,7 @@ func TestEnsureCanonicalScopeConfigStatePreservesExplicitOptOutJSONL(t *testing.
 		t.Fatal(err)
 	}
 
-	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{
+	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, dir, contract.ConfigState{
 		IssuePrefix:    "rig",
 		EndpointOrigin: contract.EndpointOriginExplicit,
 		EndpointStatus: contract.EndpointStatusUnverified,
@@ -236,6 +236,9 @@ func TestEnsureCanonicalScopeConfigStatePreservesExplicitOptOutJSONL(t *testing.
 }
 
 func TestEnsureCanonicalScopeConfigStateReapsManagedJSONL(t *testing.T) {
+	// Managed origin + hydrated (row-count>0) + untracked export: the canonical
+	// sweep still reaps it. Seam A gate stubbed to the "safe to delete" branch.
+	stubJSONLDeletionSeams(t, false /*tracked*/, true /*hasRows*/, true /*ok*/)
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -249,7 +252,7 @@ func TestEnsureCanonicalScopeConfigStateReapsManagedJSONL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{
+	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, dir, contract.ConfigState{
 		IssuePrefix:    "gc",
 		EndpointOrigin: contract.EndpointOriginManagedCity,
 		EndpointStatus: contract.EndpointStatusVerified,
@@ -4937,10 +4940,21 @@ dolt.port: 3307
 	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(invalidCfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GC_BEADS", "exec:"+writeGcBeadsBdInitEnvCaptureScript(t, filepath.Join(t.TempDir(), "should-not-run")))
+	captureFile := filepath.Join(t.TempDir(), "should-not-run")
+	t.Setenv("GC_BEADS", "exec:"+writeGcBeadsBdInitEnvCaptureScript(t, captureFile))
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
-	if err := initAndHookDir(cityPath, cityPath, "gc"); err == nil || !strings.Contains(err.Error(), "invalid canonical city endpoint state") {
-		t.Fatalf("initAndHookDir() error = %v, want invalid canonical city endpoint state", err)
+	// Seam A (dac-y7mg.1) inverted initAndHookDir to hydrate before the
+	// config-sync, so this invalid managed-city endpoint state (a managed_city
+	// origin must not pin dolt.host/port/user) is now surfaced by init's
+	// connection resolution rather than the pre-init normalize. It is still
+	// rejected fail-closed BEFORE bd init runs; only the wrapper prefix changed
+	// ("invalid canonical endpoint state" vs "...city endpoint state").
+	err := initAndHookDir(cityPath, cityPath, "gc")
+	if err == nil || !strings.Contains(err.Error(), "managed city config must not track dolt.host") {
+		t.Fatalf("initAndHookDir() error = %v, want a fail-closed invalid-canonical-endpoint-state rejection", err)
+	}
+	if _, statErr := os.Stat(captureFile); !os.IsNotExist(statErr) {
+		t.Fatalf("gc-beads-bd init ran despite an invalid canonical config (capture present); want fail-closed before init")
 	}
 }
 

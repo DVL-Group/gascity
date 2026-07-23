@@ -27,7 +27,7 @@ func scopeConfigPath(dir string) string {
 func TestEnsureCanonicalScopeConfigStateInjectsRequiredCustomTypes(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{IssuePrefix: "gc"}); err != nil {
+	if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, dir, contract.ConfigState{IssuePrefix: "gc"}); err != nil {
 		t.Fatalf("ensureCanonicalScopeConfigState() error = %v", err)
 	}
 
@@ -62,7 +62,7 @@ func TestEnsureCanonicalScopeConfigStatePreservesExistingCustomTypes(t *testing.
 		t.Fatal(err)
 	}
 
-	if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, contract.ConfigState{IssuePrefix: "gc"}); err != nil {
+	if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, dir, contract.ConfigState{IssuePrefix: "gc"}); err != nil {
 		t.Fatalf("ensureCanonicalScopeConfigState() error = %v", err)
 	}
 

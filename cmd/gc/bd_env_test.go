@@ -5639,6 +5639,9 @@ func TestScopeIsGCManagedExplicitOptOutBeatsExportAutoFalse(t *testing.T) {
 // removed on the next bd-store construction, so the next bd create does
 // not stall on auto-import.
 func TestReapStaleBdExportJSONLRemovesFileOnManagedScope(t *testing.T) {
+	// Managed scope with a hydrated (row-count>0), untracked export: reap still
+	// removes it. Seam A gate stubbed to the "safe to delete" branch.
+	stubJSONLDeletionSeams(t, false /*tracked*/, true /*hasRows*/, true /*ok*/)
 	scope := t.TempDir()
 	beadsDir := filepath.Join(scope, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5653,7 +5656,7 @@ func TestReapStaleBdExportJSONLRemovesFileOnManagedScope(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	reapStaleBdExportJSONL(scope)
+	reapStaleBdExportJSONL(scope, scope)
 
 	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
 		t.Fatalf("jsonl present after reap; stat err = %v, want IsNotExist", err)
@@ -5661,6 +5664,7 @@ func TestReapStaleBdExportJSONLRemovesFileOnManagedScope(t *testing.T) {
 }
 
 func TestControlBdStoreForCityReapsStaleBdExportJSONL(t *testing.T) {
+	stubJSONLDeletionSeams(t, false /*tracked*/, true /*hasRows*/, true /*ok*/)
 	cityPath := t.TempDir()
 	beadsDir := filepath.Join(cityPath, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -5683,6 +5687,7 @@ func TestControlBdStoreForCityReapsStaleBdExportJSONL(t *testing.T) {
 }
 
 func TestControlBdStoreForRigReapsStaleBdExportJSONL(t *testing.T) {
+	stubJSONLDeletionSeams(t, false /*tracked*/, true /*hasRows*/, true /*ok*/)
 	cityPath := t.TempDir()
 	rigDir := filepath.Join(cityPath, "repo")
 	beadsDir := filepath.Join(rigDir, ".beads")
@@ -5724,7 +5729,7 @@ func TestReapStaleBdExportJSONLLeavesFileOnExplicitOptOut(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	reapStaleBdExportJSONL(scope)
+	reapStaleBdExportJSONL(scope, scope)
 
 	if _, err := os.Stat(jsonlPath); err != nil {
 		t.Fatalf("jsonl removed on explicit opt-out; stat err = %v, want nil", err)
@@ -5747,7 +5752,7 @@ func TestReapStaleBdExportJSONLLeavesFileOnUnmanagedScope(t *testing.T) {
 	}
 	// No config.yaml at all — definitely not gc-managed.
 
-	reapStaleBdExportJSONL(scope)
+	reapStaleBdExportJSONL(scope, scope)
 
 	if _, err := os.Stat(jsonlPath); err != nil {
 		t.Fatalf("jsonl removed on unmanaged scope; stat err = %v, want nil", err)

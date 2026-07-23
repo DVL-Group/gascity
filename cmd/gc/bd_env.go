@@ -57,7 +57,7 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	if err != nil {
 		cfg = nil
 	}
-	reapStaleBdExportJSONL(dir)
+	reapStaleBdExportJSONL(dir, cityPath)
 	return beads.NewBdStoreWithPrefix(
 		dir,
 		bdCommandRunnerForCity(cityPath),
@@ -79,7 +79,7 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 			}
 		}
 	}
-	reapStaleBdExportJSONL(rigDir)
+	reapStaleBdExportJSONL(rigDir, cityPath)
 	return beads.NewBdStoreWithPrefix(
 		rigDir,
 		bdCommandRunnerForRig(cityPath, cfg, rigDir),
@@ -113,12 +113,18 @@ func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
 // file (e.g., a bd-aware viewer) shouldn't fail the caller's operation. Reads
 // use os.Stat/os.Remove (not fsys.OSFS) so the helper stays callable from
 // store constructors that don't carry an fs seam.
-func reapStaleBdExportJSONL(scopeRoot string) {
+//
+// Seam A (dac-y7mg.1): even for a gc-managed scope, the export is never reaped
+// while it is git-tracked or while the scope's managed Dolt is empty/unprovable
+// — jsonlDeletionAllowed enforces that the JSONL is a redundant export before
+// any removal, so a not-yet-hydrated tracked mirror is never destroyed. cityPath
+// scopes the managed row-count probe.
+func reapStaleBdExportJSONL(scopeRoot, cityPath string) {
 	scopeRoot = strings.TrimSpace(scopeRoot)
 	if scopeRoot == "" {
 		return
 	}
-	jsonlPath := filepath.Join(scopeRoot, ".beads", "issues.jsonl")
+	jsonlPath := jsonlExportPath(scopeRoot)
 	if _, err := os.Stat(jsonlPath); err != nil {
 		// Fast path: no file → nothing to do. This is the steady state
 		// once the cleanup has run once, so the rest of the helper is
@@ -129,6 +135,11 @@ func reapStaleBdExportJSONL(scopeRoot string) {
 		// Unmanaged scope: leave the file alone. Removing it under those
 		// conditions could race with a legitimate auto-exporter (e.g., a
 		// rig that opted out of managed canonicalization).
+		return
+	}
+	if !jsonlDeletionAllowed(scopeRoot, cityPath) {
+		// Git-tracked or empty/unprovable managed store: the export may be
+		// the only durable copy of the scope's issues. Fail closed.
 		return
 	}
 	_ = os.Remove(jsonlPath)
@@ -176,7 +187,7 @@ func scopeIsGCManaged(scopeRoot string) bool {
 }
 
 func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {
-	reapStaleBdExportJSONL(dir)
+	reapStaleBdExportJSONL(dir, cityPath)
 	return beads.NewBdStoreWithPrefix(
 		dir,
 		controlBdCommandRunnerForCity(cityPath),
@@ -195,7 +206,7 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 			}
 		}
 	}
-	reapStaleBdExportJSONL(rigDir)
+	reapStaleBdExportJSONL(rigDir, cityPath)
 	return beads.NewBdStoreWithPrefix(
 		rigDir,
 		controlBdCommandRunnerForRig(cityPath, cfg, rigDir),
