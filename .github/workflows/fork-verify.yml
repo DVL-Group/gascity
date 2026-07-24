@@ -13,6 +13,10 @@ name: fork-verify
 on:
   push:
     branches: ["feat/**", "fix/**"]
+  # `verify` is a required status check on main; the pull_request trigger
+  # guarantees every PR gets the check regardless of head-branch naming.
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
