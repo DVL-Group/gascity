@@ -145,8 +145,8 @@ func cmdBeadsMaterialize(opts beadsMaterializeOptions, stdout, stderr io.Writer)
 			// operator knows the managed store is in a mixed state, and stop —
 			// do not attempt the remaining scopes.
 			if len(done) > 0 {
-				fmt.Fprintf(stderr, "%s: PARTIAL — materialized %d of %d scope(s) before failure: %s; the managed store is incomplete\n",
-					name, len(done), len(scopes), strings.Join(done, ", ")) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "%s: PARTIAL — materialized %d of %d scope(s) before failure: %s; the managed store is incomplete\n", //nolint:errcheck // best-effort stderr
+					name, len(done), len(scopes), strings.Join(done, ", "))
 			} else {
 				fmt.Fprintf(stderr, "%s: no scopes materialized\n", name) //nolint:errcheck // best-effort stderr
 			}

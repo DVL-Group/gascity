@@ -78,6 +78,7 @@ func writeManagedScope(t *testing.T) (scope, jsonlPath string, content []byte) {
 // real git process (no stub), so the git-tracked gate is exercised for real. It
 // drives git through internal/git rather than a bare exec.Command so it adds no
 // new subprocess call site to the repository resource census.
+//nolint:unparam // relPath is fixed today (.beads/issues.jsonl) but the helper's contract is per-path
 func gitTrack(t *testing.T, repoDir, relPath string) {
 	t.Helper()
 	g := git.New(repoDir)
