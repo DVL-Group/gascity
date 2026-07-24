@@ -78,6 +78,7 @@ func writeManagedScope(t *testing.T) (scope, jsonlPath string, content []byte) {
 // real git process (no stub), so the git-tracked gate is exercised for real. It
 // drives git through internal/git rather than a bare exec.Command so it adds no
 // new subprocess call site to the repository resource census.
+//
 //nolint:unparam // relPath is fixed today (.beads/issues.jsonl) but the helper's contract is per-path
 func gitTrack(t *testing.T, repoDir, relPath string) {
 	t.Helper()
@@ -206,7 +207,8 @@ func TestReapIdempotentNeverRewipesTrackedExport(t *testing.T) {
 // config-sync/reap, so a surviving JSONL is imported before anything can delete it.
 func TestInitAndHookDirHydratesBeforeNormalize(t *testing.T) {
 	var order []string
-	stubInitAndHookDirSteps(t,
+	stubInitAndHookDirSteps(
+		t,
 		func(_, _, _, _ string) error { order = append(order, "hydrate"); return nil },
 		func(_, _, _, _ string) error { order = append(order, "normalize"); return nil },
 	)
@@ -226,7 +228,8 @@ func TestInitAndHookDirHydratesBeforeNormalize(t *testing.T) {
 func TestInitAndHookDirFailsClosedOnHydrationError(t *testing.T) {
 	wantErr := errors.New("bd init: hydration boom")
 	var normalizeCalls int
-	stubInitAndHookDirSteps(t,
+	stubInitAndHookDirSteps(
+		t,
 		func(_, _, _, _ string) error { return wantErr },
 		func(_, _, _, _ string) error { normalizeCalls++; return nil },
 	)
