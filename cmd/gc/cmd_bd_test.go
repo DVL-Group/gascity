@@ -1259,7 +1259,7 @@ func TestBdRigWorktreeStoreConsistentAcrossRawBdGcBdAndProviderStore(t *testing.
 		}); err != nil {
 			t.Fatalf("EnsureCanonicalMetadata(%s): %v", scope.name, err)
 		}
-		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, scope.root, contract.ConfigState{
+		if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, scope.root, cityPath, contract.ConfigState{
 			IssuePrefix:    scope.prefix,
 			EndpointOrigin: scope.origin,
 			EndpointStatus: contract.EndpointStatusVerified,
