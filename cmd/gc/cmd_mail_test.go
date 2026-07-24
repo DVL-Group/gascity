@@ -1454,7 +1454,7 @@ func TestCmdMailInbox_NormalizesCanonicalManagedProviderEnvAndReadsInbox(t *test
 	}); err != nil {
 		t.Fatalf("EnsureCanonicalMetadata(): %v", err)
 	}
-	if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, cityDir, contract.ConfigState{
+	if err := ensureCanonicalScopeConfigState(fsys.OSFS{}, cityDir, cityDir, contract.ConfigState{
 		IssuePrefix:    "gc",
 		EndpointOrigin: contract.EndpointOriginCityCanonical,
 		EndpointStatus: contract.EndpointStatusVerified,

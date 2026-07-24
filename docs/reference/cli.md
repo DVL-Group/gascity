@@ -314,6 +314,7 @@ gc beads
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
+| [gc beads materialize](#gc-beads-materialize) | Materialize deferred managed bead stores without booting a supervisor |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
 
 ## gc beads city
@@ -416,6 +417,44 @@ gc beads list --status open --format=json
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
+
+## gc beads materialize
+
+Complete the deferred managed bead-store initialization for the city
+scope and/or named adopted rigs, exactly as the supervisor would at boot, but
+without registering a supervisor, checking AI-provider readiness, or starting
+any agent session.
+
+For each selected scope this runs the Seam A hydrate-before-normalize funnel
+(the same initAndHookDir the supervisor runs), after ensuring the city's
+managed Dolt server is running — reusing a healthy server, or starting it via
+the managed-start path (never a bare dolt). A git-tracked or not-yet-hydrated
+.beads/issues.jsonl is preserved, and re-running is idempotent.
+
+Scope selection:
+  (no flag)    materialize the city scope (hq)
+  --rig NAME   materialize the named adopted rig (repeatable)
+  --all        materialize the city scope and every gc-managed rig
+
+Safe under env -i with a lab HOME/GC_HOME. Exits non-zero (naming the scopes
+that already completed) on any partial materialization.
+
+```
+gc beads materialize [flags]
+```
+
+**Example:**
+
+```
+gc beads materialize
+gc beads materialize --rig elt-pipeline
+gc beads materialize --all
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--all` | bool |  | materialize the city scope and every gc-managed rig |
+| `--rig` | stringArray |  | materialize this adopted rig by name (repeatable) |
 
 ## gc beads show
 

@@ -23,7 +23,7 @@ fallback to direct bd reads.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health, list, show)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc beads: missing subcommand (city, health, list, materialize, show)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc beads: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -34,6 +34,7 @@ fallback to direct bd reads.`,
 		newBeadsCityCmd(stdout, stderr),
 		newBeadsHealthCmd(stdout, stderr),
 		newBeadsListCmd(stdout, stderr),
+		newBeadsMaterializeCmd(stdout, stderr),
 		newBeadsShowCmd(stdout, stderr),
 	)
 	return cmd
