@@ -156,6 +156,10 @@ var (
 	// config-sync ever runs). Same seam idiom as the vars above.
 	initAndHookDirInitBeads           = initBeadsForDir
 	initAndHookDirNormalizeScopeFiles = normalizeCanonicalBdScopeFilesForInit
+	// Seam A completion (dac-y7mg.4): the eager import that hydrates a
+	// surviving issues.jsonl into the just-initialized (empty) store, indirected
+	// on the same seam idiom so tests can pin its position in the sequence.
+	initAndHookDirHydrateJSONL = hydrateScopeFromSurvivingJSONL
 )
 
 func isRetryableManagedDoltLifecycleError(err error) bool {
@@ -541,16 +545,30 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	doltDatabase := canonicalScopeDoltDatabase(cityPath, dir, prefix)
 	// Seam A (dac-y7mg.1 / spike 002 §4): hydrate the scope's managed Dolt
 	// BEFORE any canonical config-sync/reap. initBeadsForDir runs `bd init`,
-	// which auto-imports a surviving .beads/issues.jsonl into the empty managed
-	// database. This funnel previously ran normalizeCanonicalBdScopeFilesForInit
-	// FIRST; that config-sync writes export.auto:false and reaps the JSONL,
-	// deleting the only copy of the issues before init could import it — the
-	// dac-75f3 89→0 wipe. Init-first is also fail-closed: a hydration error
-	// returns here with the tracked JSONL untouched, never falling through to
-	// config-sync/reap. The post-init normalize re-asserts the canonical config
-	// (bd init may recreate .beads/); its reap is additionally gated by
-	// jsonlDeletionAllowed, so a git-tracked or not-yet-hydrated mirror survives.
+	// which creates the empty managed database. This funnel previously ran
+	// normalizeCanonicalBdScopeFilesForInit FIRST; that config-sync writes
+	// export.auto:false and reaps the JSONL, deleting the only copy of the issues
+	// before anything could import it — the dac-75f3 89→0 wipe. Init-first is
+	// also fail-closed: an error returns here with the tracked JSONL untouched,
+	// never falling through to config-sync/reap. The post-init normalize
+	// re-asserts the canonical config (bd init may recreate .beads/); its reap is
+	// additionally gated by jsonlDeletionAllowed, so a git-tracked or
+	// not-yet-hydrated mirror survives.
+	//
+	// dac-y7mg.1 relied on `bd init` itself auto-importing the surviving JSONL.
+	// bd 1.0.5 did; bd 1.1.0 does not — hence the explicit import step below.
 	if err := initAndHookDirInitBeads(cityPath, dir, prefix, doltDatabase); err != nil {
+		return err
+	}
+	// Seam A completion (dac-y7mg.4): under bd 1.1.0 the `bd init` above no
+	// longer auto-imports a surviving issues.jsonl into the fresh managed
+	// database (1.0.5 did), and no other gc-native path does either — adopt
+	// "succeeded" with the JSONL preserved but the store EMPTY. Import it here,
+	// still strictly BEFORE the reaping config-sync below, and still fail-closed:
+	// an import error returns with the JSONL untouched and normalize never runs.
+	// The import is a no-op unless the file survives and the store is provably
+	// row-count-0; see jsonl_hydration.go for the full invariant list.
+	if err := initAndHookDirHydrateJSONL(cityPath, dir); err != nil {
 		return err
 	}
 	if err := initAndHookDirNormalizeScopeFiles(cityPath, dir, prefix, doltDatabase); err != nil {

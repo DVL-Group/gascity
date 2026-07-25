@@ -178,12 +178,25 @@ repo as a rig without losing that data.
 ### Hydrate before normalize
 
 Adoption is **lossless by construction**. `gc rig add --adopt` runs the
-scope's `bd init` — which imports a surviving `issues.jsonl` into the
-(initially empty) managed Dolt database — **before** it runs the canonical
-config sync that would otherwise reap the export. Hydrating first means the
-rows are safely in Dolt before anything is allowed to delete the file. If the
-import fails, adopt aborts **fail-closed** with the tracked `issues.jsonl`
-untouched; it never falls through to the config sync.
+scope's `bd init` (which creates the managed Dolt database) and then imports a
+surviving `issues.jsonl` into it — both **before** the canonical config sync
+that would otherwise reap the export. Hydrating first means the rows are safely
+in Dolt before anything is allowed to delete the file. If the import fails,
+adopt aborts **fail-closed** with the tracked `issues.jsonl` untouched; it
+never falls through to the config sync.
+
+The import is an explicit step (`hydrateScopeFromSurvivingJSONL`), not a side
+effect of `bd init`: bd 1.0.5 auto-imported a surviving export on init, bd
+1.1.0 does not, and bd's write-time auto-import fires only in embedded mode —
+never for a gc-managed store, which is always server mode. Without the explicit
+step, adoption "succeeded" with the JSONL preserved but the managed store
+**empty**. gc runs the import only when the file survives on disk **and** the
+scope's store is provably row-count-0; a store that already has rows is never
+re-imported (`bd import` is an upsert and would replay a possibly-stale mirror
+over live rows), and a row-count that cannot be proven is treated as
+possibly-populated, warned about, and skipped rather than imported blind.
+Because the same funnel backs `gc rig add --adopt`, `gc beads materialize`,
+`gc init`, and controller boot, every one of them hydrates identically.
 
 ### The reaping guard
 
