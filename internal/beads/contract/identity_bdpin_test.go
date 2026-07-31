@@ -8,7 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-func writeIdentityBody(t *testing.T, body string) (fsys.FS, string) {
+func writeIdentityBody(t *testing.T, body string) string {
 	t.Helper()
 	root := t.TempDir()
 	fs := fsys.OSFS{}
@@ -18,7 +18,7 @@ func writeIdentityBody(t *testing.T, body string) (fsys.FS, string) {
 	if err := fs.WriteFile(ProjectIdentityPath(root), []byte(body), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	return fs, root
+	return root
 }
 
 // TestUnpinnedWriteIsByteIdenticalToLegacyFormat is a churn guard, not a
@@ -105,8 +105,8 @@ func TestVersionOnlyPinDoesNotImplyASchemaPin(t *testing.T) {
 // silently-ignored typo would leave the operator believing a scope is pinned
 // while the resolver treats it as unpinned — enforcement lost, no signal.
 func TestReadBDPinRejectsTypos(t *testing.T) {
-	fs, root := writeIdentityBody(t, "[project]\nid = \"p\"\n\n[bd]\nexpectd_version = \"1.1.0\"\n")
-	if _, pinned, err := ReadBDPin(fs, root); err == nil {
+	root := writeIdentityBody(t, "[project]\nid = \"p\"\n\n[bd]\nexpectd_version = \"1.1.0\"\n")
+	if _, pinned, err := ReadBDPin(fsys.OSFS{}, root); err == nil {
 		t.Fatalf("typo accepted (pinned=%v); a misspelled pin must not read as unpinned", pinned)
 	}
 }
@@ -115,8 +115,8 @@ func TestReadBDPinRejectsTypos(t *testing.T) {
 // a parse failure must surface as an error, never as (false, nil), because the
 // resolver reads "not pinned" as "nothing to enforce".
 func TestReadBDPinDistinguishesUnreadableFromUnpinned(t *testing.T) {
-	fs, root := writeIdentityBody(t, "this is not toml {{{\n")
-	pin, pinned, err := ReadBDPin(fs, root)
+	root := writeIdentityBody(t, "this is not toml {{{\n")
+	pin, pinned, err := ReadBDPin(fsys.OSFS{}, root)
 	if err == nil {
 		t.Fatal("malformed identity.toml parsed without error")
 	}
@@ -134,8 +134,8 @@ func TestReadBDPinDistinguishesUnreadableFromUnpinned(t *testing.T) {
 // reports: bd prints "1.1.0" while operators habitually write "v1.1.0", and a
 // literal comparison of those two would refuse a correctly-matched binary.
 func TestReadBDPinNormalizesVersionPrefix(t *testing.T) {
-	fs, root := writeIdentityBody(t, "[project]\nid = \"p\"\n\n[bd]\nexpected_version = \"v1.1.0\"\n")
-	pin, pinned, err := ReadBDPin(fs, root)
+	root := writeIdentityBody(t, "[project]\nid = \"p\"\n\n[bd]\nexpected_version = \"v1.1.0\"\n")
+	pin, pinned, err := ReadBDPin(fsys.OSFS{}, root)
 	if err != nil || !pinned {
 		t.Fatalf("ReadBDPin = (pinned=%v, err=%v), want (true, nil)", pinned, err)
 	}

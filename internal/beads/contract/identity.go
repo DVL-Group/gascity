@@ -69,7 +69,7 @@ func ReadProjectIdentity(fs fsys.FS, scopeRoot string) (string, bool, error) {
 // identityDoc is the whole strict shape of .beads/identity.toml.
 //
 // Every section the file may legally carry must appear here: the decoder
-// below rejects unknown keys, so a section that is modelled in one reader
+// below rejects unknown keys, so a section that is modeled in one reader
 // but not another would make a legitimate file unreadable through the
 // other. The [bd] section (Seam B) is therefore declared alongside
 // [project] even though ReadProjectIdentity ignores its contents.

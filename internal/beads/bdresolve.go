@@ -43,6 +43,7 @@
 // scope in the fleet on upgrade, which is a bigger outage than the one this
 // guards against. Enforcement is dark until a scope is pinned, and total once
 // it is.
+
 package beads
 
 import (
