@@ -84,7 +84,20 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
 
+		// Seam B (bdresolve.go): for bd, the scope's own pin decides which
+		// binary runs — and whether one runs at all. A refusal returns here,
+		// BEFORE exec, so a mismatched bd is never invoked even once.
+		exe := name
 		if name == "bd" {
+			resolved, err := resolveBdCommand(ctx, dir, env)
+			if err != nil {
+				trace("refused", err)
+				return nil, err
+			}
+			if resolved != "" {
+				exe = resolved
+			}
+
 			bdArgs := append([]string(nil), args...)
 			agentID := bdTelemetryAgentID(env)
 			slowTimer := time.AfterFunc(bdSlowTelemetryThreshold, func() {
@@ -93,7 +106,7 @@ func execCommandRunnerWithEnv(parent context.Context, env map[string]string) Com
 			defer slowTimer.Stop()
 		}
 
-		cmd := exec.CommandContext(ctx, name, args...)
+		cmd := exec.CommandContext(ctx, exe, args...)
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
 		cmd.Dir = dir
