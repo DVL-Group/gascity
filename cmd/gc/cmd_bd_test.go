@@ -845,6 +845,7 @@ name = "demo"
 	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"gc-1"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeCanonicalMetadata(t, cityDir)
 
 	binDir := t.TempDir()
 	script := filepath.Join(binDir, "bd")

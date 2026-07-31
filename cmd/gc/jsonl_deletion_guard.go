@@ -37,21 +37,47 @@ func jsonlExportPath(scopeRoot string) string {
 }
 
 // jsonlDeletionAllowed reports whether scopeRoot/.beads/issues.jsonl may be
-// safely removed. Deletion is permitted ONLY when BOTH hold:
+// safely removed. Deletion is permitted ONLY when ALL of these hold:
 //
-//   - the file is NOT git ls-files-tracked — a tracked JSONL is a committed
-//     source-of-truth mirror that must survive registration byte-for-byte; and
-//   - the scope's managed Dolt store contains at least one issue row — so the
-//     JSONL is a redundant export, not the last durable copy.
+//   - git PROVES the file is not tracked — a tracked JSONL is a committed
+//     source-of-truth mirror that must survive registration byte-for-byte, and
+//     an unprovable answer counts as tracked (see below);
+//   - the scope carries the canonical .beads/metadata.json that pins WHICH
+//     database bd addresses for it; and
+//   - that pinned store contains at least one row — so the JSONL is a redundant
+//     export, not the last durable copy.
 //
-// It fails closed: any inability to prove row-count > 0 (store unopenable, list
-// error, database absent) preserves the file. The cheap git-tracked check runs
-// first, so the common tracked-mirror case never pays for a store open.
+// Every check fails closed, in both halves:
+//
+//   - Row count: any inability to prove row-count > 0 (store unopenable, list
+//     error, database absent) preserves the file.
+//   - Git: an UNKNOWN answer (git absent, safe.directory refusal, corrupt
+//     index, unreadable .git) is treated as tracked. Only a definitive negative
+//     — pathspec matched nothing, or no repository above the scope at all —
+//     clears this gate.
+//   - Metadata: this is the SAME precondition hydrateScopeFromSurvivingJSONL
+//     enforces, and for the same verified reason. A scope with no canonical
+//     metadata.json has no pinned database, so bd resolves the SERVER'S DEFAULT
+//     database instead. The row-count probe then reports that foreign
+//     database's contents, and a non-empty one would authorize deleting this
+//     scope's only copy of its issues on the strength of somebody else's rows.
+//     An earlier revision of this comment claimed a misresolved endpoint
+//     "surfaces as a list error → deletion denied, never data loss"; the
+//     hydration seam disproved that — misresolution succeeds and answers about
+//     the wrong database. Without this check the deletion gate was the weaker
+//     of the two siblings.
+//
+// Order is cheapest-first: the git-tracked check, then a single metadata.json
+// read, so the common tracked-mirror case never pays for a store open.
 func jsonlDeletionAllowed(scopeRoot, cityPath string) bool {
 	if scopeRoot == "" {
 		return false
 	}
-	if jsonlPathIsGitTracked(scopeRoot) {
+	tracked, err := jsonlPathIsGitTracked(scopeRoot)
+	if err != nil || tracked {
+		return false
+	}
+	if !canonicalScopeStoreInitialized(scopeRoot) {
 		return false
 	}
 	hasRows, ok := scopeManagedStoreHasRows(scopeRoot, cityPath)
@@ -64,14 +90,21 @@ func jsonlDeletionAllowed(scopeRoot, cityPath string) bool {
 // bead-store-open chain, so binding the real closures to initialized vars would
 // form an initialization cycle. Tests assign these to drive either branch of
 // the gate without a live git repo or Dolt server.
+//
+// Note for test authors: stubbing scopeHasManagedRowsHook makes the gate blind
+// to the QUERY the real probe issues. That is exactly how the closed/ephemeral
+// filtering defect below survived a full unit suite, so the query shape has its
+// own hook-free coverage against a real BdStore runner.
 var (
-	jsonlIsGitTrackedHook   func(scopeRoot string) bool
+	jsonlIsGitTrackedHook   func(scopeRoot string) (tracked bool, err error)
 	scopeHasManagedRowsHook func(scopeRoot, cityPath string) (hasRows, ok bool)
 )
 
 // jsonlPathIsGitTracked reports whether scopeRoot/.beads/issues.jsonl is tracked
-// in git. A non-repo, untracked, ignored, or absent path is false.
-func jsonlPathIsGitTracked(scopeRoot string) bool {
+// in git. A definitively untracked, ignored, or absent path — and a scope with
+// no repository above it — is (false, nil). An error means git could not
+// answer; callers must treat that as possibly tracked.
+func jsonlPathIsGitTracked(scopeRoot string) (bool, error) {
 	if jsonlIsGitTrackedHook != nil {
 		return jsonlIsGitTrackedHook(scopeRoot)
 	}
@@ -79,14 +112,17 @@ func jsonlPathIsGitTracked(scopeRoot string) bool {
 }
 
 // scopeManagedStoreHasRows reports (hasRows, ok) for the scope's managed bead
-// store. ok=false means the row-count could not be determined and the caller
-// must treat the store as possibly empty (fail closed — preserve the JSONL).
+// store. The question it answers is "does this store hold ANY row", so the
+// query must not filter — see managedStoreRowProbeQuery. ok=false means the
+// row-count could not be determined and the caller must treat the store as
+// possibly empty (fail closed — preserve the JSONL, skip the import).
 //
 // It constructs the store WITHOUT the reap wrapper: bdStoreForCity /
 // bdStoreForRig call the reapers, which call this function, so reusing them
-// would recurse unboundedly. The rig-aware command runner resolves both city
-// and rig scopes; a misresolved endpoint surfaces as a list error → ok=false →
-// deletion denied, never data loss.
+// would recurse unboundedly. Callers are responsible for establishing that the
+// scope has a canonical metadata.json first; a scope without one resolves to
+// the server's DEFAULT database and this probe then reports on that foreign
+// database rather than failing (both call sites enforce that precondition).
 func scopeManagedStoreHasRows(scopeRoot, cityPath string) (hasRows, ok bool) {
 	if scopeHasManagedRowsHook != nil {
 		return scopeHasManagedRowsHook(scopeRoot, cityPath)
@@ -101,9 +137,47 @@ func scopeManagedStoreHasRows(scopeRoot, cityPath string) (hasRows, ok bool) {
 		issuePrefixForScope(scopeRoot, cityPath, cfg),
 		bdStoreOptionsForConfig(cfg)...,
 	)
-	list, err := store.List(beads.ListQuery{AllowScan: true, Limit: 1})
+	list, err := store.List(managedStoreRowProbeQuery())
 	if err != nil {
 		return false, false
 	}
 	return len(list) > 0, true
+}
+
+// managedStoreRowProbeQuery is the ListQuery both Seam A gates use to ask "is
+// this store empty".
+//
+// IncludeClosed and TierBoth are load-bearing, not defensive padding. The zero
+// ListQuery is a WORKING query, not a census: BdStore.listViaBDList appends
+// `--all` only when IncludeClosed is set or Status=="closed", and ListQuery's
+// client-side Matches drops closed rows and matchesTier drops ephemeral ones
+// under the default TierIssues. A store holding only closed issues — a finished
+// rig — therefore probed as row-count 0, which made both gates draw the exact
+// inverse of the truth:
+//
+//   - hydrateScopeFromSurvivingJSONL would `bd import` a stale mirror over a
+//     store full of live closed rows, violating its own "never import into a
+//     populated store" invariant, on every controller boot, every
+//     `gc rig add --adopt`, and every `gc beads materialize` — exiting 0 and
+//     reporting "materialized … OK" while doing it.
+//   - jsonlDeletionAllowed would deny deleting a genuinely redundant export.
+//
+// Limit 1 is retained: existence is the whole question.
+//
+// Residual, stated plainly: TierBoth makes a store holding ONLY wisps read as
+// populated. For the hydration gate that is the safe direction (never import
+// over anything). For the deletion gate it is the unsafe one — an untracked
+// issues.jsonl beside a wisps-only store becomes deletable. That state is not
+// reachable through the funnel this seam guards (wisps are created by session
+// machinery long after a scope is initialized, and a scope fresh enough to
+// still carry an unhydrated export has neither tier populated), so it is
+// recorded rather than fixed here; splitting the two callers onto different
+// tier modes is a behavior change beyond this guard.
+func managedStoreRowProbeQuery() beads.ListQuery {
+	return beads.ListQuery{
+		AllowScan:     true,
+		Limit:         1,
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
+	}
 }

@@ -251,6 +251,7 @@ func TestEnsureCanonicalScopeConfigStateReapsManagedJSONL(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeCanonicalMetadata(t, dir)
 
 	err := ensureCanonicalScopeConfigState(fsys.OSFS{}, dir, dir, contract.ConfigState{
 		IssuePrefix:    "gc",

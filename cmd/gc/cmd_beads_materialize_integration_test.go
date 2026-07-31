@@ -193,13 +193,26 @@ func containsBeadID(list []beads.Bead, id string) bool {
 	return false
 }
 
+// censusQuery lists EVERY row a scope's store holds, in every tier.
+//
+// beads.ListQuery{AllowScan: true} is a working query, not a census: bd is
+// invoked without --all (so closed rows never come back) and the client-side
+// filter additionally drops closed and ephemeral rows. Counting with it made
+// these tests pass for the wrong reason — they seed open rows, so the filtering
+// was invisible, and an assertion like "row count after a failed import = 0"
+// would have held even if the import had landed a hundred CLOSED rows. Same
+// defect as the Seam A row-count probe (see managedStoreRowProbeQuery).
+func censusQuery() beads.ListQuery {
+	return beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth}
+}
+
 func countRows(t *testing.T, storePath, cityPath string) int {
 	t.Helper()
 	store, err := openStoreAtForCity(storePath, cityPath)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(%s): %v", storePath, err)
 	}
-	list, err := store.List(beads.ListQuery{AllowScan: true})
+	list, err := store.List(censusQuery())
 	if err != nil {
 		t.Fatalf("List(%s): %v", storePath, err)
 	}

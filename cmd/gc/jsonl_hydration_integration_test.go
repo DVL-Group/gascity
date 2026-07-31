@@ -54,13 +54,18 @@ func plantTrackedJSONL(t *testing.T, scopeRoot string, content []byte) string {
 	return jsonlPath
 }
 
+// storeHasID answers over the FULL census (see censusQuery). The negative
+// assertions below — "this id must NOT have been imported" — are only worth
+// anything if a row that was imported and happens to be closed still counts as
+// present; the default working query would hide exactly that row and report the
+// absence the test hopes for.
 func storeHasID(t *testing.T, scopeRoot, cityPath, id string) bool {
 	t.Helper()
 	store, err := openStoreAtForCity(scopeRoot, cityPath)
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(%s): %v", scopeRoot, err)
 	}
-	list, err := store.List(beads.ListQuery{AllowScan: true})
+	list, err := store.List(censusQuery())
 	if err != nil {
 		t.Fatalf("List(%s): %v", scopeRoot, err)
 	}
@@ -110,41 +115,74 @@ func TestBeadsHydration_TrackedJSONLImportsExactRowCountAndSurvives(t *testing.T
 
 // bd import is an upsert. A store that already holds rows is the live copy, so a
 // stale mirror on disk must never be replayed over it — not even partially.
+//
+// closeSeeded selects whether the seeded rows are left OPEN or closed.
+//
+// The all-closed variant is the one that attacks: a finished rig holds nothing
+// but closed issues, and the row-count probe used to ask bd without --all and
+// then re-filter closed rows out client-side, so it called that store EMPTY. The
+// mirror was then imported straight over live data, on every controller boot,
+// every `gc rig add --adopt` and every `gc beads materialize` — exit 0,
+// "materialized … OK". Seeding only OPEN rows (as this test originally did) and
+// counting with the same closed-excluding query made it pass for the wrong
+// reason: neither half of the filtering was ever exercised.
 func TestBeadsHydration_PopulatedStoreIsNeverReimported(t *testing.T) {
-	cityPath := setupFreshManagedBdWaitTestCity(t)
-	failIfProviderReadinessProbed(t)
-	rigPath := filepath.Join(cityPath, "frontend")
+	for _, tc := range []struct {
+		name        string
+		closeSeeded bool
+	}{
+		{"open rows", false},
+		{"all rows CLOSED — a finished rig", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := setupFreshManagedBdWaitTestCity(t)
+			failIfProviderReadinessProbed(t)
+			rigPath := filepath.Join(cityPath, "frontend")
 
-	if code := cmdBeadsMaterialize(beadsMaterializeOptions{rigs: []string{"frontend"}}, os.Stderr, os.Stderr); code != 0 {
-		t.Fatalf("cmdBeadsMaterialize(--rig frontend) = %d, want 0", code)
-	}
-	const seeded = 3
-	rigStore, err := openStoreAtForCity(rigPath, cityPath)
-	if err != nil {
-		t.Fatalf("openStoreAtForCity(rig): %v", err)
-	}
-	for i := 0; i < seeded; i++ {
-		if _, err := rigStore.Create(beads.Bead{Title: "live row", Type: "task"}); err != nil {
-			t.Fatalf("seed rig issue %d: %v", i, err)
-		}
-	}
+			if code := cmdBeadsMaterialize(beadsMaterializeOptions{rigs: []string{"frontend"}}, os.Stderr, os.Stderr); code != 0 {
+				t.Fatalf("cmdBeadsMaterialize(--rig frontend) = %d, want 0", code)
+			}
+			const seeded = 3
+			rigStore, err := openStoreAtForCity(rigPath, cityPath)
+			if err != nil {
+				t.Fatalf("openStoreAtForCity(rig): %v", err)
+			}
+			for i := 0; i < seeded; i++ {
+				created, err := rigStore.Create(beads.Bead{Title: "live row", Type: "task"})
+				if err != nil {
+					t.Fatalf("seed rig issue %d: %v", i, err)
+				}
+				if tc.closeSeeded {
+					if err := rigStore.Close(created.ID); err != nil {
+						t.Fatalf("close seeded issue %s: %v", created.ID, err)
+					}
+				}
+			}
+			// Precondition: the census must see the seeded rows in BOTH variants.
+			// If this fails for the closed variant the probe is filtering and the
+			// assertions below would be vacuous.
+			if got := countRows(t, rigPath, cityPath); got != seeded {
+				t.Fatalf("seeded row count = %d, want %d (closed=%v) — the census query is dropping rows", got, seeded, tc.closeSeeded)
+			}
 
-	// A mirror whose rows are NOT in the store. If the eager import ran, these
-	// ids would appear and the count would jump.
-	content, ids := hydrationFixtureJSONL("fe", 5)
-	jsonlPath := plantTrackedJSONL(t, rigPath, content)
+			// A mirror whose rows are NOT in the store. If the eager import ran,
+			// these ids would appear and the count would jump.
+			content, ids := hydrationFixtureJSONL("fe", 5)
+			jsonlPath := plantTrackedJSONL(t, rigPath, content)
 
-	if code := cmdBeadsMaterialize(beadsMaterializeOptions{rigs: []string{"frontend"}}, os.Stderr, os.Stderr); code != 0 {
-		t.Fatalf("re-run cmdBeadsMaterialize(--rig frontend) = %d, want 0", code)
-	}
+			if code := cmdBeadsMaterialize(beadsMaterializeOptions{rigs: []string{"frontend"}}, os.Stderr, os.Stderr); code != 0 {
+				t.Fatalf("re-run cmdBeadsMaterialize(--rig frontend) = %d, want 0", code)
+			}
 
-	if got := countRows(t, rigPath, cityPath); got != seeded {
-		t.Fatalf("rig row count = %d, want %d (a populated store was re-imported from its JSONL mirror)", got, seeded)
+			if got := countRows(t, rigPath, cityPath); got != seeded {
+				t.Fatalf("rig row count = %d, want %d (a populated store was re-imported from its JSONL mirror)", got, seeded)
+			}
+			if storeHasID(t, rigPath, cityPath, ids[0]) {
+				t.Fatalf("issue %s was imported into a store that already had rows", ids[0])
+			}
+			requireFileEquals(t, jsonlPath, content)
+		})
 	}
-	if storeHasID(t, rigPath, cityPath, ids[0]) {
-		t.Fatalf("issue %s was imported into a store that already had rows", ids[0])
-	}
-	requireFileEquals(t, jsonlPath, content)
 }
 
 // Fail-closed against a REAL bd failure (unparseable JSONL): materialize exits
