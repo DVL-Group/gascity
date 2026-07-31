@@ -193,17 +193,20 @@ func containsBeadID(list []beads.Bead, id string) bool {
 	return false
 }
 
-// censusQuery lists EVERY row a scope's store holds, in every tier.
+// allIssuesQuery counts every ISSUE a scope's store holds, open or closed.
 //
 // beads.ListQuery{AllowScan: true} is a working query, not a census: bd is
 // invoked without --all (so closed rows never come back) and the client-side
-// filter additionally drops closed and ephemeral rows. Counting with it made
-// these tests pass for the wrong reason — they seed open rows, so the filtering
-// was invisible, and an assertion like "row count after a failed import = 0"
-// would have held even if the import had landed a hundred CLOSED rows. Same
-// defect as the Seam A row-count probe (see managedStoreRowProbeQuery).
-func censusQuery() beads.ListQuery {
-	return beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth}
+// filter drops closed rows again. Counting with it made these tests pass for
+// the wrong reason — they seed open rows, so the filtering was invisible, and
+// an assertion like "row count after a failed import = 0" would have held even
+// if the import had landed a hundred CLOSED rows.
+//
+// It deliberately mirrors managedStoreRowProbeQuery's predicate — issues tier,
+// closed included — so these tests measure the same thing the production gate
+// measures, rather than a wider census that would drift from it.
+func allIssuesQuery() beads.ListQuery {
+	return beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierIssues}
 }
 
 func countRows(t *testing.T, storePath, cityPath string) int {
@@ -212,7 +215,7 @@ func countRows(t *testing.T, storePath, cityPath string) int {
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(%s): %v", storePath, err)
 	}
-	list, err := store.List(censusQuery())
+	list, err := store.List(allIssuesQuery())
 	if err != nil {
 		t.Fatalf("List(%s): %v", storePath, err)
 	}

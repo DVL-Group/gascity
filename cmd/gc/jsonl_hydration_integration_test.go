@@ -54,7 +54,7 @@ func plantTrackedJSONL(t *testing.T, scopeRoot string, content []byte) string {
 	return jsonlPath
 }
 
-// storeHasID answers over the FULL census (see censusQuery). The negative
+// storeHasID answers over all issues, closed included (see allIssuesQuery). The negative
 // assertions below — "this id must NOT have been imported" — are only worth
 // anything if a row that was imported and happens to be closed still counts as
 // present; the default working query would hide exactly that row and report the
@@ -65,7 +65,7 @@ func storeHasID(t *testing.T, scopeRoot, cityPath, id string) bool {
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(%s): %v", scopeRoot, err)
 	}
-	list, err := store.List(censusQuery())
+	list, err := store.List(allIssuesQuery())
 	if err != nil {
 		t.Fatalf("List(%s): %v", scopeRoot, err)
 	}
@@ -158,8 +158,8 @@ func TestBeadsHydration_PopulatedStoreIsNeverReimported(t *testing.T) {
 					}
 				}
 			}
-			// Precondition: the census must see the seeded rows in BOTH variants.
-			// If this fails for the closed variant the probe is filtering and the
+			// Precondition: the count must see the seeded rows in BOTH variants.
+			// If this fails for the closed variant the query is filtering and the
 			// assertions below would be vacuous.
 			if got := countRows(t, rigPath, cityPath); got != seeded {
 				t.Fatalf("seeded row count = %d, want %d (closed=%v) — the census query is dropping rows", got, seeded, tc.closeSeeded)

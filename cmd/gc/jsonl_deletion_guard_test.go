@@ -451,13 +451,15 @@ func TestExplicitEndpointOriginPreservedOnlyWhenValid(t *testing.T) {
 //
 //   - `bd list` withholds closed rows unless --all is passed;
 //   - `bd list` never returns ephemeral rows at all — they are reachable only
-//     via `bd query "ephemeral=true"`.
+//     via `bd query "ephemeral=true"`;
+//   - `bd list` withholds TEMPLATE rows unless --include-templates is passed.
 //
 // It records every argv it is handed.
 type bdListEmulator struct {
 	closedIssuesJSON string // served by `bd list` ONLY when --all is present
 	openIssuesJSON   string // served by `bd list` always
 	ephemeralJSON    string // served by `bd query ephemeral=true`
+	templateJSON     string // served by `bd list` ONLY when --include-templates is present
 	calls            [][]string
 }
 
@@ -472,6 +474,9 @@ func (e *bdListEmulator) runner() beads.CommandRunner {
 			rows := e.openIssuesJSON
 			if slices.Contains(args, "--all") {
 				rows = joinJSONRows(rows, e.closedIssuesJSON)
+			}
+			if slices.Contains(args, "--include-templates") {
+				rows = joinJSONRows(rows, e.templateJSON)
 			}
 			return []byte("[" + rows + "]"), nil
 		case "query":
@@ -512,6 +517,7 @@ func (e *bdListEmulator) store(t *testing.T) *beads.BdStore {
 const (
 	closedIssueRow    = `{"id":"zz-1","title":"finished work","status":"closed","issue_type":"task"}`
 	ephemeralWispRow  = `{"id":"zz-w1","title":"session slot","status":"open","issue_type":"session","ephemeral":true}`
+	templateRow       = `{"id":"zz-t1","title":"cooked formula template","status":"open","issue_type":"task"}`
 	legacyProbeReason = "the pre-fix probe (ListQuery{AllowScan:true, Limit:1}) reported this store EMPTY"
 )
 
@@ -550,30 +556,44 @@ func TestManagedStoreRowProbeQuerySeesAnAllClosedStore(t *testing.T) {
 	}
 }
 
-// Same defect, the other filter: matchesTier drops ephemeral rows under the
-// default TierIssues, and `bd list` does not return them at all.
-func TestManagedStoreRowProbeQuerySeesAnEphemeralOnlyStore(t *testing.T) {
-	emu := &bdListEmulator{ephemeralJSON: ephemeralWispRow}
-	store := emu.store(t)
+// The deliberate NARROWING (see managedStoreRowProbeQuery): rows that are not
+// issues must NOT make an issues export look redundant.
+//
+// A wisps-only store is controller-owned session slots; a template-only store
+// is what `bd cook` leaves behind when a formula is installed. Neither can
+// stand in for the contents of issues.jsonl. If either read as "populated",
+// hydration would skip forever AND the untracked mirror would become
+// deletable — the data-loss direction. TierBoth would have counted both
+// (bdListShouldIncludeTemplates adds --include-templates for every non-message
+// TierBoth query), which is why the probe stays on the issues tier.
+func TestManagedStoreRowProbeQueryIgnoresNonIssueRows(t *testing.T) {
+	t.Run("wisps only", func(t *testing.T) {
+		emu := &bdListEmulator{ephemeralJSON: ephemeralWispRow}
+		got, err := emu.store(t).List(managedStoreRowProbeQuery())
+		if err != nil {
+			t.Fatalf("probe List: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("a wisps-only store probed as populated (%d rows); an untracked issues.jsonl beside it would become deletable", len(got))
+		}
+		if emu.sawFlag("list", "--include-templates") {
+			t.Fatal("probe asked bd for template rows; templates are not issues and must not count as a populated store")
+		}
+	})
 
-	legacy, err := store.List(legacyProbeQuery())
-	if err != nil {
-		t.Fatalf("legacy probe List: %v", err)
-	}
-	if len(legacy) != 0 {
-		t.Fatalf("control broken: legacy probe returned %d rows, want 0", len(legacy))
-	}
-
-	got, err := store.List(managedStoreRowProbeQuery())
-	if err != nil {
-		t.Fatalf("probe List: %v", err)
-	}
-	if len(got) == 0 {
-		t.Fatalf("an ephemeral-only store probes as EMPTY; %s", legacyProbeReason)
-	}
-	if !emu.sawFlag("query", "--all") {
-		t.Fatal("probe never issued the ephemeral-tier `bd query`; wisps are unreachable through `bd list`")
-	}
+	t.Run("templates only", func(t *testing.T) {
+		// bd only returns template rows when --include-templates is passed, so
+		// the emulator serves them on that condition alone. The probe must
+		// never ask for them.
+		emu := &bdListEmulator{templateJSON: templateRow}
+		got, err := emu.store(t).List(managedStoreRowProbeQuery())
+		if err != nil {
+			t.Fatalf("probe List: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("a template-only store probed as populated (%d rows); hydration would never run and the mirror would be deletable", len(got))
+		}
+	})
 }
 
 // A genuinely empty store must still probe empty — the fix must not simply

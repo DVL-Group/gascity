@@ -144,16 +144,16 @@ func scopeManagedStoreHasRows(scopeRoot, cityPath string) (hasRows, ok bool) {
 	return len(list) > 0, true
 }
 
-// managedStoreRowProbeQuery is the ListQuery both Seam A gates use to ask "is
-// this store empty".
+// managedStoreRowProbeQuery is the ListQuery both Seam A gates use to ask the
+// one question that decides whether a scope's issues.jsonl is redundant:
 //
-// IncludeClosed and TierBoth are load-bearing, not defensive padding. The zero
-// ListQuery is a WORKING query, not a census: BdStore.listViaBDList appends
-// `--all` only when IncludeClosed is set or Status=="closed", and ListQuery's
-// client-side Matches drops closed rows and matchesTier drops ephemeral ones
-// under the default TierIssues. A store holding only closed issues — a finished
-// rig — therefore probed as row-count 0, which made both gates draw the exact
-// inverse of the truth:
+//	does this store already hold the ISSUES the JSONL would supply?
+//
+// IncludeClosed is load-bearing. The zero ListQuery is a WORKING query, not a
+// census: BdStore.listViaBDList appends `--all` only when IncludeClosed is set
+// or Status=="closed", and ListQuery's client-side Matches drops closed rows
+// again. A store holding only closed issues — a finished rig — therefore probed
+// as row-count 0, which made both gates draw the exact inverse of the truth:
 //
 //   - hydrateScopeFromSurvivingJSONL would `bd import` a stale mirror over a
 //     store full of live closed rows, violating its own "never import into a
@@ -164,20 +164,31 @@ func scopeManagedStoreHasRows(scopeRoot, cityPath string) (hasRows, ok bool) {
 //
 // Limit 1 is retained: existence is the whole question.
 //
-// Residual, stated plainly: TierBoth makes a store holding ONLY wisps read as
-// populated. For the hydration gate that is the safe direction (never import
-// over anything). For the deletion gate it is the unsafe one — an untracked
-// issues.jsonl beside a wisps-only store becomes deletable. That state is not
-// reachable through the funnel this seam guards (wisps are created by session
-// machinery long after a scope is initialized, and a scope fresh enough to
-// still carry an unhydrated export has neither tier populated), so it is
-// recorded rather than fixed here; splitting the two callers onto different
-// tier modes is a behavior change beyond this guard.
+// TierMode stays TierIssues (the zero value), DELIBERATELY. Widening to
+// TierBoth would count rows that are not issues and cannot stand in for the
+// export's contents:
+//
+//   - Ephemeral wisps. These are controller-owned session slots, not issues.
+//     Counting them would let an untracked issues.jsonl beside a wisps-only
+//     store read as "redundant" and be deleted.
+//   - Templates. bdListShouldIncludeTemplates adds --include-templates for
+//     every non-message TierBoth query, and template rows are real rows written
+//     by `bd cook` when formulas/molecules are installed. (`bd init` seeds none
+//     and no migration inserts any, so a fresh adopt is unaffected — but any
+//     scope that has cooked a formula is.) A store whose only rows are cooked
+//     templates would read as populated: hydration would skip forever and
+//     deletion would be authorized.
+//
+// "At least one row of any kind" is simply not the same predicate as "the
+// issues export is redundant", and this gate sits on a data-loss boundary.
+// Restricting to the issues tier costs nothing against the defect above: a
+// scope whose issues really are in the store still answers true, via
+// IncludeClosed.
 func managedStoreRowProbeQuery() beads.ListQuery {
 	return beads.ListQuery{
 		AllowScan:     true,
 		Limit:         1,
 		IncludeClosed: true,
-		TierMode:      beads.TierBoth,
+		TierMode:      beads.TierIssues,
 	}
 }

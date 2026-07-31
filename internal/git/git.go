@@ -91,11 +91,29 @@ func (g *Git) IsTrackedCtx(ctx context.Context, relPath string) (bool, error) {
 // (directory for a normal clone, file for a linked worktree or submodule), and
 // whether that answer is determinate. An I/O fault other than "does not exist"
 // means a repository cannot be ruled out, so determinate is false.
+//
+// Symlinks are resolved FIRST, and a resolution failure is INDETERMINATE. git
+// runs with cmd.Dir set to the caller's path, so the kernel follows symlinks
+// and git operates in the target directory. A lexical walk would climb the
+// symlink's own parents instead: a scope root symlinked to a SUBDIRECTORY of a
+// repository elsewhere finds no .git above the link, and this function would
+// hand back a confident "no repository" for a path git considers tracked —
+// reopening, for exactly the failures IsTrackedCtx exists to close, the
+// fail-open hole. (Resolving only at the first Lstat is not enough: that
+// traverses the link but the subsequent ancestor steps do not.)
 func hasGitDirAncestor(dir string) (inRepo, determinate bool) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return false, false
 	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		// Cannot establish where this path really points (broken link,
+		// permission denied, ELOOP, or the directory is simply gone). A
+		// repository cannot be ruled out.
+		return false, false
+	}
+	abs = resolved
 	for {
 		_, statErr := os.Lstat(filepath.Join(abs, ".git"))
 		switch {
