@@ -3,7 +3,9 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,18 +41,94 @@ func (g *Git) IsRepoCtx(ctx context.Context) bool {
 }
 
 // IsTracked reports whether relPath (relative to the worktree root) is a file
-// tracked in git's index. Returns false when the path is untracked, ignored,
-// absent, or when workDir is not inside a git repository. Uses `git ls-files
-// --error-unmatch`, which exits non-zero precisely when the pathspec matches
-// no tracked file.
-func (g *Git) IsTracked(relPath string) bool {
+// tracked in git's index, using `git ls-files --error-unmatch`.
+//
+// The bool is meaningful ONLY when the error is nil. Three outcomes:
+//
+//   - (true, nil)  — git matched a tracked file.
+//   - (false, nil) — git gave a DEFINITIVE negative: the pathspec matched no
+//     tracked file (ls-files exit status 1), or workDir has no repository
+//     above it at all, so nothing there can be tracked.
+//   - (false, err) — UNKNOWN. git is absent from PATH, refused the repository
+//     (safe.directory / dubious ownership), found a corrupt index, or could
+//     not read .git. Callers using trackedness as a safety gate must treat
+//     this as "possibly tracked" and fail closed.
+//
+// The error return exists because the previous bool-only signature collapsed
+// every UNKNOWN above into a confident "not tracked" — a check that fails OPEN.
+// Its one safety-gate caller (the Seam A JSONL deletion guard) would then let a
+// committed source-of-truth mirror be deleted on any box where git happened to
+// be unusable.
+func (g *Git) IsTracked(relPath string) (bool, error) {
 	return g.IsTrackedCtx(context.Background(), relPath)
 }
 
 // IsTrackedCtx is like IsTracked but accepts a context for cancellation.
-func (g *Git) IsTrackedCtx(ctx context.Context, relPath string) bool {
+func (g *Git) IsTrackedCtx(ctx context.Context, relPath string) (bool, error) {
 	_, err := g.runCtx(ctx, "ls-files", "--error-unmatch", "--", relPath)
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	// Exit status 1 is ls-files' documented "pathspec matched no tracked file".
+	// That is git ANSWERING, not git failing. Every other status (128 for the
+	// fatals, or no status at all when the binary is missing) is a failure to
+	// answer.
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	// git could not answer. One class of failure is still a definitive negative:
+	// there is no repository anywhere above workDir, so no path under it can be
+	// tracked. That is settled on the filesystem rather than by matching git's
+	// stderr, which is localized and version-dependent.
+	if inRepo, determinate := hasGitDirAncestor(g.workDir); determinate && !inRepo {
+		return false, nil
+	}
+	return false, err
+}
+
+// hasGitDirAncestor reports whether dir or any ancestor holds a .git entry
+// (directory for a normal clone, file for a linked worktree or submodule), and
+// whether that answer is determinate. An I/O fault other than "does not exist"
+// means a repository cannot be ruled out, so determinate is false.
+//
+// Symlinks are resolved FIRST, and a resolution failure is INDETERMINATE. git
+// runs with cmd.Dir set to the caller's path, so the kernel follows symlinks
+// and git operates in the target directory. A lexical walk would climb the
+// symlink's own parents instead: a scope root symlinked to a SUBDIRECTORY of a
+// repository elsewhere finds no .git above the link, and this function would
+// hand back a confident "no repository" for a path git considers tracked —
+// reopening, for exactly the failures IsTrackedCtx exists to close, the
+// fail-open hole. (Resolving only at the first Lstat is not enough: that
+// traverses the link but the subsequent ancestor steps do not.)
+func hasGitDirAncestor(dir string) (inRepo, determinate bool) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return false, false
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		// Cannot establish where this path really points (broken link,
+		// permission denied, ELOOP, or the directory is simply gone). A
+		// repository cannot be ruled out.
+		return false, false
+	}
+	abs = resolved
+	for {
+		_, statErr := os.Lstat(filepath.Join(abs, ".git"))
+		switch {
+		case statErr == nil:
+			return true, true
+		case !errors.Is(statErr, fs.ErrNotExist):
+			// Permission denied, ELOOP, I/O error: cannot rule a repository out.
+			return false, false
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return false, true
+		}
+		abs = parent
+	}
 }
 
 // Init runs `git init` in workDir, creating a fresh repository there.

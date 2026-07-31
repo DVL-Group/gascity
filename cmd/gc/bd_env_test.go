@@ -5655,6 +5655,10 @@ func TestReapStaleBdExportJSONLRemovesFileOnManagedScope(t *testing.T) {
 		[]byte("issue_prefix: zz\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	// A scope gc manages is a scope gc has PINNED: without metadata.json the
+	// gate refuses to act at all (it would be asking the server's default
+	// database about this scope's rows), so the fixture must carry it.
+	writeCanonicalMetadata(t, scope)
 
 	reapStaleBdExportJSONL(scope, scope)
 
@@ -5678,6 +5682,7 @@ func TestControlBdStoreForCityReapsStaleBdExportJSONL(t *testing.T) {
 		[]byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	writeCanonicalMetadata(t, cityPath)
 
 	controlBdStoreForCity(cityPath, cityPath, nil)
 
@@ -5702,6 +5707,7 @@ func TestControlBdStoreForRigReapsStaleBdExportJSONL(t *testing.T) {
 		[]byte("issue_prefix: repo\ngc.endpoint_origin: inherited_city\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	writeCanonicalMetadata(t, rigDir)
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir, Prefix: "repo"}}}
 
 	controlBdStoreForRig(rigDir, cityPath, cfg)

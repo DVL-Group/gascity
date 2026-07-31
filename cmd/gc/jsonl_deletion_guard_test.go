@@ -6,8 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
@@ -20,10 +23,15 @@ import (
 // that a preseeded explicit origin survives managed canonicalization.
 
 // stubJSONLDeletionSeams overrides both Seam A gate probes for the test:
-// git-tracked → tracked, managed row-count → (hasRows, ok). Restored on cleanup.
+// git-tracked → (tracked, nil), managed row-count → (hasRows, ok). Restored on
+// cleanup.
+//
+// Stubbing the row probe deliberately blinds the test to the QUERY the real
+// probe issues — which is how the closed/ephemeral filtering defect survived
+// this suite. TestManagedStoreRowProbeQuery* below covers that hook-free.
 func stubJSONLDeletionSeams(t *testing.T, tracked, hasRows, ok bool) {
 	t.Helper()
-	jsonlIsGitTrackedHook = func(string) bool { return tracked }
+	jsonlIsGitTrackedHook = func(string) (bool, error) { return tracked, nil }
 	scopeHasManagedRowsHook = func(_, _ string) (bool, bool) { return hasRows, ok }
 	t.Cleanup(func() {
 		jsonlIsGitTrackedHook = nil
@@ -37,6 +45,38 @@ func stubManagedRows(t *testing.T, hasRows, ok bool) {
 	t.Helper()
 	scopeHasManagedRowsHook = func(_, _ string) (bool, bool) { return hasRows, ok }
 	t.Cleanup(func() { scopeHasManagedRowsHook = nil })
+}
+
+// countingManagedRowsStub is stubManagedRows plus a call counter, for zero-call
+// invariants: a gate that rejects on a cheaper precondition must never reach
+// the store at all.
+func countingManagedRowsStub(t *testing.T, hasRows, ok bool) *int {
+	t.Helper()
+	calls := 0
+	scopeHasManagedRowsHook = func(_, _ string) (bool, bool) {
+		calls++
+		return hasRows, ok
+	}
+	t.Cleanup(func() { scopeHasManagedRowsHook = nil })
+	return &calls
+}
+
+// writeCanonicalMetadata gives scopeRoot the .beads/metadata.json that pins
+// WHICH database bd addresses for it. Without this file bd resolves the
+// server's DEFAULT database, so both Seam A gates refuse to act on the scope.
+func writeCanonicalMetadata(t *testing.T, scopeRoot string) {
+	t.Helper()
+	beadsDir := filepath.Join(scopeRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"database":"beads_test_scope","backend":"dolt"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !canonicalScopeStoreInitialized(scopeRoot) {
+		t.Fatal("canonicalScopeStoreInitialized = false after writing metadata.json; test precondition broken")
+	}
 }
 
 // stubInitAndHookDirSteps swaps the hydrate/normalize seams of initAndHookDir so
@@ -53,8 +93,11 @@ func stubInitAndHookDirSteps(t *testing.T, hydrate, normalize func(cityPath, dir
 	})
 }
 
-// writeManagedScope materializes a managed-origin scope with a stale JSONL
-// export and returns (scopeRoot, jsonlPath, content).
+// writeManagedScope materializes a managed-origin scope that gc has already
+// initialized (canonical metadata.json present) with a stale JSONL export, and
+// returns (scopeRoot, jsonlPath, content). The metadata is part of the fixture
+// so these tests exercise the git and row-count gates rather than
+// short-circuiting on the metadata precondition.
 func writeManagedScope(t *testing.T) (scope, jsonlPath string, content []byte) {
 	t.Helper()
 	scope = t.TempDir()
@@ -71,6 +114,7 @@ func writeManagedScope(t *testing.T) (scope, jsonlPath string, content []byte) {
 		[]byte("issue_prefix: elt\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeCanonicalMetadata(t, scope)
 	return scope, jsonlPath, content
 }
 
@@ -90,8 +134,9 @@ func gitTrack(t *testing.T, repoDir, relPath string) {
 		t.Fatalf("git add %s: %v", relPath, err)
 	}
 	// Sanity: the real probe must now agree the path is tracked.
-	if !g.IsTracked(relPath) {
-		t.Fatalf("git.IsTracked(%q) = false after add; test precondition broken", relPath)
+	tracked, err := g.IsTracked(relPath)
+	if err != nil || !tracked {
+		t.Fatalf("git.IsTracked(%q) = (%v, %v) after add; test precondition broken", relPath, tracked, err)
 	}
 }
 
@@ -120,8 +165,10 @@ func TestJSONLDeletionAllowedTruthTable(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			scope := t.TempDir()
+			writeCanonicalMetadata(t, scope)
 			stubJSONLDeletionSeams(t, c.tracked, c.hasRows, c.okDB)
-			if got := jsonlDeletionAllowed("/scope", "/city"); got != c.want {
+			if got := jsonlDeletionAllowed(scope, "/city"); got != c.want {
 				t.Fatalf("jsonlDeletionAllowed = %v, want %v", got, c.want)
 			}
 		})
@@ -131,6 +178,102 @@ func TestJSONLDeletionAllowedTruthTable(t *testing.T) {
 		if jsonlDeletionAllowed("", "/city") {
 			t.Fatal("empty scopeRoot must block deletion")
 		}
+	})
+}
+
+// The metadata precondition, which the deletion gate previously lacked while
+// its hydration sibling enforced it.
+//
+// A scope with no canonical .beads/metadata.json has no pinned database, so bd
+// resolves the SERVER'S DEFAULT one. The row-count probe then answers about a
+// FOREIGN database — and a populated foreign database would authorize deleting
+// this scope's only copy of its issues. The old comment on the gate claimed a
+// misresolved endpoint "surfaces as a list error → deletion denied, never data
+// loss"; hydration's verified note (bd warns "no beads configuration found …
+// using default database name beads" and then answers) says otherwise.
+//
+// Both halves are asserted: the gate must deny, and it must deny WITHOUT
+// consulting the store at all — a zero-call invariant, because reaching the
+// store is itself the act of asking the wrong database.
+func TestJSONLDeletionDeniedWithoutCanonicalMetadata(t *testing.T) {
+	scope := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlIsGitTrackedHook = func(string) (bool, error) { return false, nil }
+	t.Cleanup(func() { jsonlIsGitTrackedHook = nil })
+	// The most dangerous configuration: the (foreign) store reports rows.
+	probes := countingManagedRowsStub(t, true /*hasRows*/, true /*ok*/)
+
+	if jsonlDeletionAllowed(scope, "/city") {
+		t.Fatal("deletion allowed for a scope with no canonical metadata.json; a populated FOREIGN database authorized wiping this scope's only copy")
+	}
+	if *probes != 0 {
+		t.Fatalf("row-count probe ran %d times on an unpinned scope; want 0 — the probe would be addressing the server's default database", *probes)
+	}
+}
+
+// Neither deleter may touch the file for an unpinned scope either — the gate is
+// only useful if the call sites honor it.
+func TestDeletersPreserveExportOnUnpinnedScope(t *testing.T) {
+	newUnpinnedScope := func(t *testing.T) (scope, jsonlPath string, content []byte) {
+		t.Helper()
+		scope, jsonlPath, content = writeManagedScope(t)
+		if err := os.Remove(filepath.Join(scope, ".beads", "metadata.json")); err != nil {
+			t.Fatal(err)
+		}
+		return scope, jsonlPath, content
+	}
+	t.Run("reapStaleBdExportJSONL", func(t *testing.T) {
+		stubJSONLDeletionSeams(t, false /*tracked*/, true /*hasRows*/, true /*ok*/)
+		scope, jsonlPath, content := newUnpinnedScope(t)
+		reapStaleBdExportJSONL(scope, scope)
+		requireFileEquals(t, jsonlPath, content)
+	})
+	t.Run("removeStaleBdExportJSONL", func(t *testing.T) {
+		stubJSONLDeletionSeams(t, false, true, true)
+		scope, jsonlPath, content := newUnpinnedScope(t)
+		removeStaleBdExportJSONL(fsys.OSFS{}, scope, scope)
+		requireFileEquals(t, jsonlPath, content)
+	})
+}
+
+// The git half of the gate must fail CLOSED, matching the row-count half.
+//
+// Driven by a REAL git that genuinely cannot answer: the repo is intact and the
+// file is genuinely tracked, but the index is destroyed, so `git ls-files`
+// exits 128. Under the old `return err == nil` probe that collapsed to "not
+// tracked" and — with a populated store — authorized deleting a committed
+// source-of-truth mirror.
+func TestJSONLDeletionDeniedWhenGitCannotAnswer(t *testing.T) {
+	newBrokenGitScope := func(t *testing.T) (scope, jsonlPath string, content []byte) {
+		t.Helper()
+		scope, jsonlPath, content = writeManagedScope(t)
+		gitTrack(t, scope, jsonlRelPath) // the file really IS tracked
+		if err := os.WriteFile(filepath.Join(scope, ".git", "index"), []byte("garbage"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return scope, jsonlPath, content
+	}
+
+	t.Run("gate denies", func(t *testing.T) {
+		scope, _, _ := newBrokenGitScope(t)
+		stubManagedRows(t, true /*hasRows*/, true /*ok*/) // the tempting branch
+		if jsonlDeletionAllowed(scope, scope) {
+			t.Fatal("deletion allowed while git could not answer; the tracked-mirror half of the gate failed OPEN")
+		}
+	})
+	t.Run("reapStaleBdExportJSONL preserves", func(t *testing.T) {
+		scope, jsonlPath, content := newBrokenGitScope(t)
+		stubManagedRows(t, true, true)
+		reapStaleBdExportJSONL(scope, scope)
+		requireFileEquals(t, jsonlPath, content)
+	})
+	t.Run("removeStaleBdExportJSONL preserves", func(t *testing.T) {
+		scope, jsonlPath, content := newBrokenGitScope(t)
+		stubManagedRows(t, true, true)
+		removeStaleBdExportJSONL(fsys.OSFS{}, scope, scope)
+		requireFileEquals(t, jsonlPath, content)
 	})
 }
 
@@ -290,4 +433,204 @@ func TestExplicitEndpointOriginPreservedOnlyWhenValid(t *testing.T) {
 			t.Fatal("want rejection of an explicit city scope; got nil — canonicalization must be able to normalize invalid explicit")
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// The row-count probe's QUERY — covered without the scopeHasManagedRowsHook.
+//
+// Every other test in this package stubs that hook, which is precisely why the
+// defect below shipped: with the probe faked, the query it issues is invisible
+// and any filtering bug in it is unobservable. These tests drive a REAL
+// beads.BdStore whose CommandRunner emulates bd's actual list semantics, so the
+// query is exercised end to end.
+// ---------------------------------------------------------------------------
+
+// bdListEmulator is a CommandRunner standing in for a bd CLI backed by a store
+// whose ONLY rows are the ones given. It reproduces the two behaviors the
+// defect turned on:
+//
+//   - `bd list` withholds closed rows unless --all is passed;
+//   - `bd list` never returns ephemeral rows at all — they are reachable only
+//     via `bd query "ephemeral=true"`;
+//   - `bd list` withholds TEMPLATE rows unless --include-templates is passed.
+//
+// It records every argv it is handed.
+type bdListEmulator struct {
+	closedIssuesJSON string // served by `bd list` ONLY when --all is present
+	openIssuesJSON   string // served by `bd list` always
+	ephemeralJSON    string // served by `bd query ephemeral=true`
+	templateJSON     string // served by `bd list` ONLY when --include-templates is present
+	calls            [][]string
+}
+
+func (e *bdListEmulator) runner() beads.CommandRunner {
+	return func(_, _ string, args ...string) ([]byte, error) {
+		e.calls = append(e.calls, args)
+		if len(args) == 0 {
+			return []byte("[]"), nil
+		}
+		switch args[0] {
+		case "list":
+			rows := e.openIssuesJSON
+			if slices.Contains(args, "--all") {
+				rows = joinJSONRows(rows, e.closedIssuesJSON)
+			}
+			if slices.Contains(args, "--include-templates") {
+				rows = joinJSONRows(rows, e.templateJSON)
+			}
+			return []byte("[" + rows + "]"), nil
+		case "query":
+			rows := e.ephemeralJSON
+			if !slices.Contains(args, "--all") {
+				rows = "" // closed wisps hidden the same way
+			}
+			return []byte("[" + rows + "]"), nil
+		}
+		return []byte("[]"), nil
+	}
+}
+
+func (e *bdListEmulator) sawFlag(subcommand, flag string) bool {
+	for _, args := range e.calls {
+		if len(args) > 0 && args[0] == subcommand && slices.Contains(args, flag) {
+			return true
+		}
+	}
+	return false
+}
+
+func joinJSONRows(rows ...string) string {
+	kept := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if strings.TrimSpace(r) != "" {
+			kept = append(kept, r)
+		}
+	}
+	return strings.Join(kept, ",")
+}
+
+func (e *bdListEmulator) store(t *testing.T) *beads.BdStore {
+	t.Helper()
+	return beads.NewBdStoreWithPrefix(t.TempDir(), e.runner(), "zz")
+}
+
+const (
+	closedIssueRow    = `{"id":"zz-1","title":"finished work","status":"closed","issue_type":"task"}`
+	ephemeralWispRow  = `{"id":"zz-w1","title":"session slot","status":"open","issue_type":"session","ephemeral":true}`
+	templateRow       = `{"id":"zz-t1","title":"cooked formula template","status":"open","issue_type":"task"}`
+	legacyProbeReason = "the pre-fix probe (ListQuery{AllowScan:true, Limit:1}) reported this store EMPTY"
+)
+
+// legacyProbeQuery is the query this guard used to issue. Kept in the test as
+// the control: each case asserts the fixed query sees the rows AND that the old
+// one did not, so these tests provably catch the regression rather than merely
+// agreeing with the current code.
+func legacyProbeQuery() beads.ListQuery {
+	return beads.ListQuery{AllowScan: true, Limit: 1}
+}
+
+// A store holding only CLOSED issues — a finished rig — is populated. Reporting
+// it empty made hydration `bd import` a stale mirror over live rows on every
+// controller boot, every `gc rig add --adopt` and every `gc beads materialize`.
+func TestManagedStoreRowProbeQuerySeesAnAllClosedStore(t *testing.T) {
+	emu := &bdListEmulator{closedIssuesJSON: closedIssueRow}
+	store := emu.store(t)
+
+	legacy, err := store.List(legacyProbeQuery())
+	if err != nil {
+		t.Fatalf("legacy probe List: %v", err)
+	}
+	if len(legacy) != 0 {
+		t.Fatalf("control broken: legacy probe returned %d rows, want 0 — this test can no longer detect the regression", len(legacy))
+	}
+
+	got, err := store.List(managedStoreRowProbeQuery())
+	if err != nil {
+		t.Fatalf("probe List: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatalf("an all-closed store probes as EMPTY; %s and the fixed query still does", legacyProbeReason)
+	}
+	if !emu.sawFlag("list", "--all") {
+		t.Fatal("probe issued `bd list` without --all; bd withholds closed rows without it, so the row count is a lie")
+	}
+}
+
+// The deliberate NARROWING (see managedStoreRowProbeQuery): rows that are not
+// issues must NOT make an issues export look redundant.
+//
+// A wisps-only store is controller-owned session slots; a template-only store
+// is what `bd cook` leaves behind when a formula is installed. Neither can
+// stand in for the contents of issues.jsonl. If either read as "populated",
+// hydration would skip forever AND the untracked mirror would become
+// deletable — the data-loss direction. TierBoth would have counted both
+// (bdListShouldIncludeTemplates adds --include-templates for every non-message
+// TierBoth query), which is why the probe stays on the issues tier.
+func TestManagedStoreRowProbeQueryIgnoresNonIssueRows(t *testing.T) {
+	t.Run("wisps only", func(t *testing.T) {
+		emu := &bdListEmulator{ephemeralJSON: ephemeralWispRow}
+		got, err := emu.store(t).List(managedStoreRowProbeQuery())
+		if err != nil {
+			t.Fatalf("probe List: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("a wisps-only store probed as populated (%d rows); an untracked issues.jsonl beside it would become deletable", len(got))
+		}
+		if emu.sawFlag("list", "--include-templates") {
+			t.Fatal("probe asked bd for template rows; templates are not issues and must not count as a populated store")
+		}
+	})
+
+	t.Run("templates only", func(t *testing.T) {
+		// bd only returns template rows when --include-templates is passed, so
+		// the emulator serves them on that condition alone. The probe must
+		// never ask for them.
+		emu := &bdListEmulator{templateJSON: templateRow}
+		got, err := emu.store(t).List(managedStoreRowProbeQuery())
+		if err != nil {
+			t.Fatalf("probe List: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("a template-only store probed as populated (%d rows); hydration would never run and the mirror would be deletable", len(got))
+		}
+	})
+}
+
+// A genuinely empty store must still probe empty — the fix must not simply
+// force the answer to "populated", which would disable hydration entirely.
+func TestManagedStoreRowProbeQueryStillReportsAnEmptyStoreEmpty(t *testing.T) {
+	emu := &bdListEmulator{}
+	got, err := emu.store(t).List(managedStoreRowProbeQuery())
+	if err != nil {
+		t.Fatalf("probe List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty store probed as %d rows, want 0 — hydration would never run again", len(got))
+	}
+}
+
+// Composition: the fixed query's verdict for an all-closed store, fed to the
+// gate that consumes it, must suppress the import. This closes the loop the two
+// halves would otherwise leave open (correct query + correct branch, never
+// joined). The import hook is asserted zero-call: the point is that nothing
+// happens.
+func TestHydrationSkipsImportForAnAllClosedStore(t *testing.T) {
+	emu := &bdListEmulator{closedIssuesJSON: closedIssueRow}
+	rows, err := emu.store(t).List(managedStoreRowProbeQuery())
+	if err != nil {
+		t.Fatalf("probe List: %v", err)
+	}
+	hasRows := len(rows) > 0
+
+	scope, jsonlPath, content := hydrationScope(t)
+	stubManagedRows(t, hasRows, true)
+	calls := stubHydrationImport(t, []byte("Imported 2 issues\n"), nil)
+
+	if err := hydrateScopeFromSurvivingJSONL(scope, scope); err != nil {
+		t.Fatalf("hydrateScopeFromSurvivingJSONL: %v", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("bd import ran %d times against a store full of closed rows; want 0 — an upsert from a stale mirror over live data", len(*calls))
+	}
+	requireFileEquals(t, jsonlPath, content)
 }
