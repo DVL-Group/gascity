@@ -44,8 +44,9 @@ func jsonlExportPath(scopeRoot string) string {
 //     an unprovable answer counts as tracked (see below);
 //   - the scope carries the canonical .beads/metadata.json that pins WHICH
 //     database bd addresses for it; and
-//   - that pinned store contains at least one row — so the JSONL is a redundant
-//     export, not the last durable copy.
+//   - that pinned store already holds at least one ISSUE, open or closed — so
+//     the JSONL is a redundant export, not the last durable copy. Wisps and
+//     templates do not count; see managedStoreRowProbeQuery.
 //
 // Every check fails closed, in both halves:
 //
@@ -112,10 +113,11 @@ func jsonlPathIsGitTracked(scopeRoot string) (bool, error) {
 }
 
 // scopeManagedStoreHasRows reports (hasRows, ok) for the scope's managed bead
-// store. The question it answers is "does this store hold ANY row", so the
-// query must not filter — see managedStoreRowProbeQuery. ok=false means the
-// row-count could not be determined and the caller must treat the store as
-// possibly empty (fail closed — preserve the JSONL, skip the import).
+// store. The question it answers is "does this store already hold ISSUES" —
+// open or closed, excluding wisps and templates; see managedStoreRowProbeQuery
+// for why that is the predicate and not a bare row count. ok=false means it
+// could not be determined and the caller must treat the store as possibly
+// empty (fail closed — preserve the JSONL, skip the import).
 //
 // It constructs the store WITHOUT the reap wrapper: bdStoreForCity /
 // bdStoreForRig call the reapers, which call this function, so reusing them
