@@ -637,7 +637,7 @@ func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 	// Rig MEMBERSHIP must come from the merged config, not raw city.toml.
 	// A city may declare rigs in an included file -- `include = [...]` merges
 	// [[rigs]] arrays exactly like every other table -- and `gc rig list`,
-	// config validation and the runtime all honour that. Reading city.toml
+	// config validation and the runtime all honor that. Reading city.toml
 	// alone here made both directions wrong:
 	//
 	//   false positive: a rig declared via include looked like an "unknown rig

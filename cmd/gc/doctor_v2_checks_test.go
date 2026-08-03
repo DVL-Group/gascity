@@ -1838,7 +1838,7 @@ func writeDoctorFile(t *testing.T, root, rel, contents string) {
 
 // A rig declared in an INCLUDED file is no less declared than an inline one:
 // `include = [...]` merges [[rigs]] arrays, and gc rig list, config validation
-// and the runtime all honour that. This check used to read city.toml alone,
+// and the runtime all honor that. This check used to read city.toml alone,
 // which broke both directions -- see the comments in Run/Fix.
 func TestV2RigPathSiteBindingAcceptsRigsDeclaredViaInclude(t *testing.T) {
 	t.Parallel()
