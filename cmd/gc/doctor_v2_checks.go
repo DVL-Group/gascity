@@ -504,6 +504,19 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 	if err != nil {
 		return err
 	}
+	// Two different sets, previously conflated -- which is why this refused to
+	// run on any city that declares rigs in an included file:
+	//
+	//   legacyByName -- rigs whose path still lives in city.toml. RAW config,
+	//     because those are exactly the entries this fix migrates out.
+	//   declared     -- every rig name the city knows, MERGED config, because
+	//     `include = [...]` merges [[rigs]] and an included rig is no less
+	//     declared than an inline one.
+	//
+	// Using legacyByName for orphan detection meant a site.toml binding for an
+	// included rig looked stale, so Fix refused with "remove or rename the
+	// stale entries" -- advice that strips the rig's path and leaves the city
+	// unable to start.
 	legacyByName := make(map[string]string, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
 		name := strings.TrimSpace(rig.Name)
@@ -511,6 +524,17 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 			continue
 		}
 		legacyByName[name] = strings.TrimSpace(rig.Path)
+	}
+	declared := make(map[string]struct{}, len(cfg.Rigs))
+	for name := range legacyByName {
+		declared[name] = struct{}{}
+	}
+	if merged, _, mergeErr := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(ctx.CityPath, "city.toml")); mergeErr == nil && merged != nil {
+		for _, rig := range merged.Rigs {
+			if name := strings.TrimSpace(rig.Name); name != "" {
+				declared[name] = struct{}{}
+			}
+		}
 	}
 	existing, err := config.LoadSiteBinding(fsys.OSFS{}, ctx.CityPath)
 	if err != nil {
@@ -526,7 +550,7 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 	}
 	var orphans []string
 	for name, site := range existingByName {
-		if _, ok := legacyByName[name]; ok {
+		if _, ok := declared[name]; ok {
 			continue
 		}
 		orphans = append(orphans, fmt.Sprintf("rig %q: .gc/site.toml=%q", name, site))
@@ -609,8 +633,33 @@ func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 			"repair or remove the malformed .gc/site.toml file, then rerun gc doctor",
 			nil)
 	}
-	declared := make(map[string]struct{}, len(cfg.Rigs))
-	for _, rig := range cfg.Rigs {
+
+	// Rig MEMBERSHIP must come from the merged config, not raw city.toml.
+	// A city may declare rigs in an included file -- `include = [...]` merges
+	// [[rigs]] arrays exactly like every other table -- and `gc rig list`,
+	// config validation and the runtime all honour that. Reading city.toml
+	// alone here made both directions wrong:
+	//
+	//   false positive: a rig declared via include looked like an "unknown rig
+	//     name", so its perfectly good site.toml binding was reported as
+	//     orphaned. The emitted hint says to delete that binding, which strips
+	//     the rig's path and makes `gc start` fail closed with
+	//     `validate rigs: rig "<name>": path is required` -- i.e. the advice
+	//     bricks the city.
+	//
+	//   false negative: an included rig with NO binding was never reported as
+	//     unbound, so the one condition that actually prevents startup passed
+	//     silently.
+	//
+	// `legacy` above deliberately keeps using raw city.toml: it reports paths
+	// that still live in that file, and the fix migrates them out of it.
+	membership := cfg
+	if merged, _, mergeErr := config.LoadWithIncludes(fsys.OSFS{}, cityTomlPath); mergeErr == nil && merged != nil {
+		membership = merged
+	}
+
+	declared := make(map[string]struct{}, len(membership.Rigs))
+	for _, rig := range membership.Rigs {
 		declared[rig.Name] = struct{}{}
 	}
 	boundBySite := make(map[string]struct{}, len(binding.Rigs))
@@ -629,7 +678,7 @@ func (v2RigPathSiteBindingCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResu
 		orphan = append(orphan, name)
 	}
 	var unbound []string
-	for _, rig := range cfg.Rigs {
+	for _, rig := range membership.Rigs {
 		if strings.TrimSpace(rig.Path) != "" {
 			continue
 		}

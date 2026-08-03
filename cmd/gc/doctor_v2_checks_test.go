@@ -1835,3 +1835,107 @@ func writeDoctorFile(t *testing.T, root, rel, contents string) {
 		t.Fatalf("WriteFile(%q): %v", path, err)
 	}
 }
+
+// A rig declared in an INCLUDED file is no less declared than an inline one:
+// `include = [...]` merges [[rigs]] arrays, and gc rig list, config validation
+// and the runtime all honour that. This check used to read city.toml alone,
+// which broke both directions -- see the comments in Run/Fix.
+func TestV2RigPathSiteBindingAcceptsRigsDeclaredViaInclude(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+include = ["rigs.generated.toml"]
+
+[workspace]
+name = "included-rigs-city"
+`)
+	writeDoctorFile(t, cityDir, "rigs.generated.toml", `
+[[rigs]]
+name = "frontend"
+`)
+	writeDoctorFile(t, cityDir, ".gc/site.toml", `
+[[rig]]
+name = "frontend"
+path = "/tmp/frontend"
+`)
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+
+	out := buf.String()
+	if strings.Contains(out, "unknown rig names") {
+		t.Fatalf("binding for an included rig was reported as orphaned; the hint tells "+
+			"operators to delete it, which strips the rig's path and makes gc start "+
+			"fail closed:\n%s", out)
+	}
+	if strings.Contains(out, "no path binding") {
+		t.Fatalf("included rig with a valid binding was reported unbound:\n%s", out)
+	}
+}
+
+// The false-negative half: an included rig with NO binding is the condition
+// that actually stops `gc start` (`rig "<name>": path is required`). Reading
+// city.toml alone meant doctor stayed silent about it.
+func TestV2RigPathSiteBindingReportsIncludedRigWithNoBinding(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+include = ["rigs.generated.toml"]
+
+[workspace]
+name = "included-rigs-city"
+`)
+	writeDoctorFile(t, cityDir, "rigs.generated.toml", `
+[[rigs]]
+name = "frontend"
+`)
+	writeDoctorFile(t, cityDir, ".gc/site.toml", `
+[[rig]]
+name = "other"
+path = "/tmp/other"
+`)
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+
+	out := buf.String()
+	if !strings.Contains(out, "no path binding") {
+		t.Fatalf("included rig with no site binding was not reported as unbound; "+
+			"this is the condition that prevents startup:\n%s", out)
+	}
+	if !strings.Contains(out, "frontend") {
+		t.Fatalf("unbound detail missing the rig name:\n%s", out)
+	}
+}
+
+// Fix refused to migrate on any city with included rigs, for the same reason.
+func TestV2RigPathSiteBindingFixAcceptsRigsDeclaredViaInclude(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+include = ["rigs.generated.toml"]
+
+[workspace]
+name = "included-rigs-city"
+`)
+	writeDoctorFile(t, cityDir, "rigs.generated.toml", `
+[[rigs]]
+name = "frontend"
+`)
+	writeDoctorFile(t, cityDir, ".gc/site.toml", `
+[[rig]]
+name = "frontend"
+path = "/tmp/frontend"
+`)
+
+	if err := (v2RigPathSiteBindingCheck{}).Fix(&doctor.CheckContext{CityPath: cityDir}); err != nil {
+		t.Fatalf("Fix refused a city whose rigs are declared via include: %v", err)
+	}
+}
