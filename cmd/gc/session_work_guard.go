@@ -82,9 +82,30 @@ func closeSessionInfoIfUnassigned(
 }
 
 // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
-// the live store scope its configured agent can query has no open or
-// in-progress work assigned to the session. It returns whether the close
-// succeeded, matching closeSessionBeadIfUnassigned's contract.
+// the live store scope its configured agent can query has no STARTABLE work
+// assigned to the session — in-progress work (already claimed) or ready open
+// work. It returns whether the close succeeded, matching
+// closeSessionBeadIfUnassigned's contract.
+//
+// "Startable", not "open", is the correct gate here, and the distinction is
+// load-bearing. A blocked, deferred, or ready-excluded open bead assigned to a
+// session is work that session provably cannot claim: the wake gate
+// (sessionHasAwakeAssignedWorkForReachableStore, used at the recycle/wake sites)
+// already declines to wake for it. Gating the close on mere openness made the two
+// gates disagree about the same bead — too blocked to wake for, yet too assigned
+// to release — which strands the session `state: awake` holding work it may never
+// start. Where sleep_after_idle is off there is no timeout to break the tie, so
+// the agent relaunches on a ~20s cycle until the model provider cuts it off. That
+// is not hypothetical: it consumed two full 5-hour quota windows (658 sessions,
+// zero work performed) before the gates were reconciled here.
+//
+// Releasing the session does not orphan the blocked bead. closeBead runs
+// releaseWorkFromClosedSessionBead, which clears the assignee on every non-closed
+// assigned bead, resets in_progress work to open, and re-routes via the closing
+// session's fallback route so the work stays discoverable — the same end state an
+// operator reaches by hand. In-progress and ready open work still hold the session
+// open, so the orphan protection this guard exists for is fully preserved.
+//
 // The session parameter is a session.Info: the reachable-store gate reads the
 // session through the typed front door, while the close routes through closeBead
 // (which already funnels its writes through sessionFrontDoor AND runs the
@@ -103,9 +124,10 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
+	hasAssignedWork, err := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
 	if err != nil {
-		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
+		// Fail closed: an unverifiable assignment keeps the session bead open.
+		fmt.Fprintf(stderr, "session work guard: checking reachable startable work for %s: %v\n", info.ID, err) //nolint:errcheck
 		return false
 	}
 	if hasAssignedWork {
