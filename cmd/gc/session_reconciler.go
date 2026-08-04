@@ -538,9 +538,14 @@ func finalizeDrainAckStoppedSession(
 			Payload:   api.SessionLifecyclePayloadJSON(info.ID, template, "drain acknowledged"),
 		})
 	}
-	hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
+	// Startable work only (in-progress, or ready open work). A blocked/deferred
+	// open bead assigned here is work this session provably cannot claim, and
+	// treating it as assigned strands the session awake forever — see the
+	// closeSessionBeadIfReachableStoreUnassigned doc for the failure it caused.
+	// Errors still fail closed.
+	hasAssignedWork, assignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
 	if assignedErr != nil {
-		fmt.Fprintf(stderr, "session reconciler: checking assigned work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
+		fmt.Fprintf(stderr, "session reconciler: checking startable work for drain-acked %s: %v\n", name, assignedErr) //nolint:errcheck
 		hasAssignedWork = true
 	}
 	if closeIfUnassigned && !hasAssignedWork {
@@ -584,9 +589,12 @@ func finalizeDrainAckStoppedSession(
 			recordStopped(false)
 			return drainAckFinalizeResult{witnessInfo: &witnessInfo}
 		}
-		assignedAfterCloseGate, closeGateAssignedErr := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
+		// Must mirror the close gate's own predicate. If this stayed ready-blind, a
+		// session whose close was refused would be re-marked assigned here and the
+		// strand would survive the fix above.
+		assignedAfterCloseGate, closeGateAssignedErr := sessionHasAwakeAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
 		if closeGateAssignedErr != nil {
-			fmt.Fprintf(stderr, "session reconciler: checking assigned work after failed drain-ack close gate for %s: %v\n", name, closeGateAssignedErr) //nolint:errcheck
+			fmt.Fprintf(stderr, "session reconciler: checking startable work after failed drain-ack close gate for %s: %v\n", name, closeGateAssignedErr) //nolint:errcheck
 			assignedAfterCloseGate = true
 		}
 		if assignedAfterCloseGate {
