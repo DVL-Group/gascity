@@ -13,7 +13,7 @@
 //
 //  1. resolves an EXACT ABSOLUTE bd binary for that scope, and
 //  2. verifies the binary's version and the store's schema against the pin in
-//     the scope's .beads/identity.toml, and
+//     the scope's identity file (contract.ProjectIdentityPath), and
 //  3. refuses to invoke bd at all when either disagrees.
 //
 // A global PATH swap is explicitly insufficient and this design says why in
@@ -32,7 +32,7 @@
 //   - Pin present, either unprovable      -> REFUSE. Being unable to prove the
 //     binary or the schema is the corruption case this seam exists to stop;
 //     "could not check" must never read as "checked and fine".
-//   - identity.toml malformed/unreadable  -> REFUSE. A file that will not parse
+//   - identity file malformed/unreadable  -> REFUSE. A file that will not parse
 //     may well carry a pin, so it cannot be treated as unpinned.
 //   - No pin (absent file, or no [bd])    -> INERT. Resolution still upgrades
 //     the name to an absolute path when it can, but nothing is enforced and
@@ -97,7 +97,7 @@ type bdResolution struct {
 // identity (path, size, mtime) means the cache self-invalidates on the two
 // remediations an operator actually performs — swapping which bd is found, or
 // replacing the binary in place — without a TTL that would re-probe on every
-// call. The pin is included so editing identity.toml re-verifies too.
+// call. The pin is included so editing the identity file re-verifies too.
 type bdResolveCacheKey struct {
 	scope   string
 	binPath string
@@ -111,7 +111,11 @@ var bdResolveCache sync.Map // map[bdResolveCacheKey]*bdResolution
 // bdResolveLookPath is exec.LookPath, indirected for tests.
 var bdResolveLookPath = exec.LookPath
 
-// bdResolveIdentityFS reads .beads/identity.toml. Indirected for tests.
+// bdResolveIdentityFS reads the scope's identity file. Indirected for tests.
+//
+// Name that file through contract.ProjectIdentityPath rather than spelling it
+// out here: the contract package owns the literal, and internal/beads/contract
+// is the only place allowed to mention it (TestNoExternalIdentityWriters).
 var bdResolveIdentityFS fsys.FS = fsys.OSFS{}
 
 // resolveBdCommand returns the absolute bd binary that scopeDir must use, after
@@ -128,7 +132,7 @@ var bdResolveIdentityFS fsys.FS = fsys.OSFS{}
 func resolveBdCommand(ctx context.Context, scopeDir string, env map[string]string) (string, error) {
 	pin, pinned, err := contract.ReadBDPin(bdResolveIdentityFS, scopeDir)
 	if err != nil {
-		// Unparseable identity.toml. It may carry a pin; refusing is the only
+		// Unparseable identity file. It may carry a pin; refusing is the only
 		// answer that cannot silently skip enforcement.
 		return "", fmt.Errorf("%w: scope %s: identity is unreadable, refusing to invoke bd: %w", ErrBdResolve, scopeDir, err)
 	}
@@ -241,8 +245,8 @@ func verifyBdForScope(ctx context.Context, scopeDir, path string, pin contract.B
 		}
 		res.version, res.schema = version, schema
 		if schema != pin.SchemaVersion {
-			res.err = fmt.Errorf("%w: scope %s: store schema is %d but identity.toml pins schema %d; %s would corrupt this store, refusing to invoke it",
-				ErrBdResolve, scopeDir, schema, pin.SchemaVersion, path)
+			res.err = fmt.Errorf("%w: scope %s: store schema is %d but %s pins schema %d; %s would corrupt this store, refusing to invoke it",
+				ErrBdResolve, scopeDir, schema, contract.ProjectIdentityPath(scopeDir), pin.SchemaVersion, path)
 			return res
 		}
 	}
@@ -263,8 +267,8 @@ func verifyBdForScope(ctx context.Context, scopeDir, path string, pin contract.B
 		res.version = probed
 	}
 	if version != pin.ExpectedVersion {
-		res.err = fmt.Errorf("%w: scope %s: %s is bd %s but identity.toml pins bd %s, refusing to invoke it",
-			ErrBdResolve, scopeDir, path, version, pin.ExpectedVersion)
+		res.err = fmt.Errorf("%w: scope %s: %s is bd %s but %s pins bd %s, refusing to invoke it",
+			ErrBdResolve, scopeDir, path, version, contract.ProjectIdentityPath(scopeDir), pin.ExpectedVersion)
 		return res
 	}
 	return res
