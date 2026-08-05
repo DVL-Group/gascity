@@ -4394,7 +4394,15 @@ func TestReconcileSessionBeads_WakesDeadSession(t *testing.T) {
 	}
 }
 
-func TestReconcileSessionBeads_AlwaysNamedSessionWakesFromDrainedCompatibilityState(t *testing.T) {
+// TestReconcileSessionBeads_AlwaysNamedSessionWakesForCommittedResetWhileDrained
+// (formerly ...WakesFromDrainedCompatibilityState) pins that a pending
+// continuation reset restarts a drained always named session. The real reset
+// flow stamps reset_committed_at alongside continuation_reset_pending
+// (RestartRequestPatch), so the staged metadata carries both; the wake now
+// flows through the reset-pending path rather than an unconditional
+// named-always wake — dac-zydt removed the latter for drained beads because
+// it respawned a no_work mayor forever.
+func TestReconcileSessionBeads_AlwaysNamedSessionWakesForCommittedResetWhileDrained(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Workspace:     config.Workspace{Name: "test-city"},
@@ -4417,6 +4425,7 @@ func TestReconcileSessionBeads_AlwaysNamedSessionWakesFromDrainedCompatibilitySt
 		"state":                      "asleep",
 		"sleep_reason":               "drained",
 		"continuation_reset_pending": "true",
+		"reset_committed_at":         env.clk.Now().UTC().Format(time.RFC3339),
 	})
 
 	woken := env.reconcile([]beads.Bead{session})
@@ -4426,6 +4435,44 @@ func TestReconcileSessionBeads_AlwaysNamedSessionWakesFromDrainedCompatibilitySt
 	}
 	if !env.sp.IsRunning(sessionName) {
 		t.Fatalf("always named session %q should have been restarted", sessionName)
+	}
+}
+
+// TestReconcileSessionBeads_AlwaysNamedSessionDrainedNoSignalsStaysAsleep is
+// the reconciler-level pin for dac-zydt: a drained always named session with
+// no demand, no reset, and no explicit wake — exactly the live mayor's shape
+// during the 2026-07/08 relaunch loops — must NOT be respawned.
+func TestReconcileSessionBeads_AlwaysNamedSessionDrainedNoSignalsStaysAsleep(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "asleep",
+		"sleep_reason":               "drained",
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 (drained no-signal always session must stay asleep)", woken)
+	}
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("always named session %q should NOT have been restarted", sessionName)
 	}
 }
 

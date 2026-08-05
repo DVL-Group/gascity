@@ -61,7 +61,13 @@ func TestNamedAlways_AsleepWakes(t *testing.T) {
 	assertAwake(t, result, "deacon")
 }
 
-func TestNamedAlways_DrainedCompatibilityStateStillWakes(t *testing.T) {
+// TestNamedAlways_DrainedNoDemandStaysAsleep overturns the former
+// TestNamedAlways_DrainedCompatibilityStateStillWakes pin (dac-zydt): a
+// drained always-session whose hook answered no_work must NOT be re-desired
+// on the next tick, or the reconciler respawns it forever (observed live:
+// 281 mayor sessions 2026-07-31, 377 on 2026-08-03, three breaker-capped
+// bursts on 2026-08-04 after the dac-ks0c fix shipped).
+func TestNamedAlways_DrainedNoDemandStaysAsleep(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "deacon"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "deacon", Template: "deacon", Mode: "always"}},
@@ -75,8 +81,83 @@ func TestNamedAlways_DrainedCompatibilityStateStillWakes(t *testing.T) {
 		}},
 		Now: now,
 	})
+	assertAsleep(t, result, "deacon")
+}
+
+func TestNamedAlways_DrainedAssignedDemandWakes(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "deacon"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "deacon", Template: "deacon", Mode: "always"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "deacon",
+			Template:      "deacon",
+			State:         "asleep",
+			NamedIdentity: "deacon",
+			Drained:       true,
+		}},
+		NamedSessionDemand: map[string]bool{"deacon": true},
+		Now:                now,
+	})
 	assertAwake(t, result, "deacon")
 	assertReason(t, result, "deacon", "named-always")
+}
+
+func TestNamedAlways_DrainedWorkQueryWakes(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "deacon"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "deacon", Template: "deacon", Mode: "always"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "deacon",
+			Template:      "deacon",
+			State:         "asleep",
+			NamedIdentity: "deacon",
+			Drained:       true,
+		}},
+		NamedSessionWorkQ: map[string]bool{"deacon": true},
+		Now:               now,
+	})
+	assertAwake(t, result, "deacon")
+	assertReason(t, result, "deacon", "named-always")
+}
+
+func TestNamedAlways_DrainedExplicitWakeWakes(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "deacon"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "deacon", Template: "deacon", Mode: "always"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "deacon",
+			Template:      "deacon",
+			State:         "asleep",
+			NamedIdentity: "deacon",
+			Drained:       true,
+			ExplicitWake:  true,
+		}},
+		Now: now,
+	})
+	assertAwake(t, result, "deacon")
+	assertReason(t, result, "deacon", "explicit-wake")
+}
+
+func TestNamedAlways_DrainedPendingCreateWakes(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "deacon"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "deacon", Template: "deacon", Mode: "always"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "deacon",
+			Template:      "deacon",
+			State:         "asleep",
+			NamedIdentity: "deacon",
+			Drained:       true,
+			PendingCreate: true,
+		}},
+		Now: now,
+	})
+	assertAwake(t, result, "deacon")
+	assertReason(t, result, "deacon", "pending-create")
 }
 
 func TestNamedAlways_ActiveStaysAwake(t *testing.T) {

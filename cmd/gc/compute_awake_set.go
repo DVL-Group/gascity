@@ -175,6 +175,15 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			if sn := resolveNamedSessionBeadName(input.SessionBeads, ns); sn != "" {
 				bead := findBeadBySessionName(input.SessionBeads, sn)
 				if bead != nil && !bead.DependencyOnly {
+					// A drained bead means the session's own hook answered its
+					// last wake with drain/no_work. Re-desiring it here spins a
+					// wake→drain→respawn loop (dac-zydt): "always" keeps the
+					// session materialized, but it only re-wakes on a demand
+					// signal — assigned/routed work, a work query, or the
+					// explicit-wake / pending-create paths handled above.
+					if bead.Drained && !input.NamedSessionDemand[ns.Identity] && !input.NamedSessionWorkQ[ns.Identity] {
+						continue
+					}
 					desired[sn] = "named-always"
 				}
 			} else {
