@@ -127,7 +127,7 @@ func TestFormatTable_InstrumentationNotes(t *testing.T) {
 		"model/prompt_version instrumentation incomplete",
 		"model missing on 2/3 worker.operation event(s)",
 		"event counts, not session counts",
-		"session.quarantined is not emitted by current production paths",
+		"no session.quarantined event in this stream",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("instrumentation note missing %q\n%s", want, out)

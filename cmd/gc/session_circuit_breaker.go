@@ -22,6 +22,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -135,6 +136,11 @@ type circuitBreakerEntry struct {
 	openedAt       time.Time
 	openRestartCnt int // snapshot of restart count at the moment the breaker opened
 	loggedOpenOnce bool
+	// quarantinedEventOnce mirrors loggedOpenOnce for the event stream: one
+	// session.quarantined event per OPEN incident, not one per suppressed
+	// respawn attempt. Reset by maybeAutoResetLocked with the rest of the
+	// incident state, so a later re-trip emits again.
+	quarantinedEventOnce bool
 }
 
 // CircuitBreakerSnapshot is a point-in-time view of a single identity's
@@ -219,6 +225,7 @@ func (b *sessionCircuitBreaker) maybeAutoResetLocked(e *circuitBreakerEntry, now
 		e.openedAt = time.Time{}
 		e.openRestartCnt = 0
 		e.loggedOpenOnce = false
+		e.quarantinedEventOnce = false
 		e.lastObserved = time.Time{}
 		e.progressSig = ""
 		e.observedSig = false
@@ -502,6 +509,64 @@ func (b *sessionCircuitBreaker) LogOpenOnce(identity string, w io.Writer) {
 		"ERROR session-circuit-breaker: CIRCUIT_OPEN for named session %q (restarts=%d in last %s, no progress). "+
 			"Supervisor will NOT respawn. Run `gc session reset %s` to clear.\n",
 		identity, e.openRestartCnt, b.cfg.Window, identity)
+}
+
+// claimQuarantineEvent is the once-gate behind RecordQuarantinedOnce. It
+// returns the tripped restart count, the window they fell inside, and true
+// exactly once per OPEN incident, then latches until maybeAutoResetLocked
+// clears the entry. Kept separate from the emit so the recorder (which may
+// do file I/O) is never called with the breaker mutex held; the window is
+// returned rather than read from b.cfg at the call site because configure()
+// writes b.cfg under this same mutex.
+func (b *sessionCircuitBreaker) claimQuarantineEvent(identity string) (int, time.Duration, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e := b.entries[identity]
+	if e == nil || e.state != circuitOpen || e.quarantinedEventOnce {
+		return 0, 0, false
+	}
+	e.quarantinedEventOnce = true
+	return e.openRestartCnt, b.cfg.Window, true
+}
+
+// RecordQuarantinedOnce emits events.SessionQuarantined the first time a
+// given OPEN incident is reported, and is the event-stream sibling of
+// LogOpenOnce's stderr message. Before this existed the breaker tripped
+// silently — a suppressed respawn was visible only to whoever was reading
+// supervisor stderr, which is the observability failure recorded in
+// dac-g714. internal/reliability already classifies this event
+// (LifecycleQuarantined) and reports whether it has ever been seen
+// (QuarantineSignalStatus), so nothing downstream needed changing.
+//
+// The event is deliberately emitted at the CLOSED->OPEN transition only,
+// not on every subsequent suppressed respawn, and not when a supervisor
+// restart restores an already-OPEN entry from bead metadata: reliability
+// counts these as lifecycle incidents, and re-emitting would inflate one
+// quarantine into many. An automatic cooldown reset followed by a fresh
+// trip is a genuinely new incident and does emit again.
+//
+// Payload is intentionally NoPayload, matching its session.* lifecycle
+// siblings (idle_killed, max_age_killed): the envelope's Subject/
+// SessionID/Message carry the facts, so the OpenAPI spec and generated
+// clients are untouched.
+func (b *sessionCircuitBreaker) RecordQuarantinedOnce(rec events.Recorder, identity, sessionID string) {
+	if rec == nil || identity == "" {
+		return
+	}
+	restarts, window, ok := b.claimQuarantineEvent(identity)
+	if !ok {
+		return
+	}
+	rec.Record(events.Event{
+		Type:      events.SessionQuarantined,
+		Actor:     "gc",
+		Subject:   identity,
+		SessionID: sessionID,
+		Message: fmt.Sprintf(
+			"session-circuit-breaker: CIRCUIT_OPEN for named session %q (restarts=%d in last %s, no progress). "+
+				"Supervisor will NOT respawn. Run `gc session reset %s` to clear.",
+			identity, restarts, window, identity),
+	})
 }
 
 // Reset forces the entry for `identity` back to CLOSED, discards any

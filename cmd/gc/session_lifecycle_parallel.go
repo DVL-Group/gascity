@@ -2795,6 +2795,13 @@ func executePlannedStartsTraced(
 							if done != nil {
 								done()
 							}
+							// This is the CLOSED->OPEN transition, and the only
+							// production site that observes it: restarts are
+							// recorded here and nowhere else. Emitting the
+							// quarantine event here (rather than on the IsOpen
+							// suppression path above) is what keeps it one event
+							// per incident.
+							cb.RecordQuarantinedOnce(rec, identity, candidate.info.ID)
 							cb.LogOpenOnce(identity, stderr)
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerCircuitTrip, TraceReasonCircuitTrip, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{

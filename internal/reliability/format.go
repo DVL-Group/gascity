@@ -91,7 +91,7 @@ func reportNotes(r Report) []string {
 		))
 	}
 	if inst.QuarantineSignalStatus == quarantineSignalStatusNotEmitted {
-		notes = append(notes, "note: session.quarantined is not emitted by current production paths; the Quarantined column is reserved pending instrumentation.")
+		notes = append(notes, "note: no session.quarantined event in this stream; the respawn circuit breaker never tripped here (it is off unless daemon.session_circuit_breaker is true).")
 	}
 	return notes
 }

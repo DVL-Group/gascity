@@ -1158,6 +1158,150 @@ func TestReconciler_CircuitTripsThroughRepeatedWakeAttempts(t *testing.T) {
 	}
 }
 
+// The quarantine event is latched per OPEN incident, not per process: it
+// fires once no matter how many times the trip site reports the same
+// incident, but a cooldown reset followed by a fresh trip is a NEW incident
+// and must emit again. Without the reset half, a session that quarantines,
+// auto-recovers, and quarantines again would go dark after the first time.
+func TestSessionCircuitBreaker_QuarantineEventOncePerIncident(t *testing.T) {
+	const identity = "rig-a/session-a"
+	t0 := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	cb := breakerAt(30*time.Minute, 2)
+	rec := &capturingRecorder{}
+
+	for i := 0; i < 3; i++ {
+		cb.RecordRestart(identity, t0.Add(time.Duration(i)*time.Minute))
+	}
+	if !cb.IsOpen(identity, t0.Add(2*time.Minute)) {
+		t.Fatal("breaker should be OPEN after 3 restarts with max 2 and no progress")
+	}
+
+	// Repeated reports of the SAME incident collapse to one event.
+	for i := 0; i < 4; i++ {
+		cb.RecordQuarantinedOnce(rec, identity, "gc-session-a")
+	}
+	if got := len(rec.quarantinedEvents()); got != 1 {
+		t.Fatalf("quarantine events for one incident = %d, want 1", got)
+	}
+	if msg := rec.quarantinedEvents()[0].Message; !strings.Contains(msg, "restarts=3") {
+		t.Errorf("first event Message = %q, want it to report restarts=3", msg)
+	}
+
+	// Cooldown elapses (ResetAfter defaults to 2*Window = 1h from the last
+	// restart), so the entry closes and the next burst is a new incident.
+	afterCooldown := t0.Add(2 * time.Minute).Add(time.Hour)
+	if cb.IsOpen(identity, afterCooldown) {
+		t.Fatal("breaker should have auto-reset to CLOSED after the cooldown")
+	}
+	for i := 0; i < 3; i++ {
+		cb.RecordRestart(identity, afterCooldown.Add(time.Duration(i)*time.Minute))
+	}
+	if !cb.IsOpen(identity, afterCooldown.Add(2*time.Minute)) {
+		t.Fatal("breaker should be OPEN again after a second no-progress burst")
+	}
+	cb.RecordQuarantinedOnce(rec, identity, "gc-session-a")
+	if got := len(rec.quarantinedEvents()); got != 2 {
+		t.Fatalf("quarantine events after a re-trip = %d, want 2 (the second incident must not be swallowed)", got)
+	}
+}
+
+// A tripped breaker must be observable in the event stream, not only in
+// supervisor stderr. A silent trip reproduces the observability failure
+// recorded in dac-g714, and leaves internal/reliability's
+// QuarantineSignalStatus reading "not emitted" forever. This pins the whole
+// contract: healthy wakes stay quiet, the trip emits exactly one
+// session.quarantined carrying the operator's reset instruction, and every
+// tick afterwards spawns nothing and re-emits nothing.
+func TestReconciler_CircuitTripEmitsQuarantineEventAndStopsRelaunch(t *testing.T) {
+	env := newReconcilerTestEnv()
+	configureAlwaysNamedSession(env)
+	env.addDesired("session-a", "template-a", false)
+	rec := &capturingRecorder{}
+	env.rec = rec
+
+	cb := breakerAt(30*time.Minute, 5)
+	restore := setSessionCircuitBreakerForTest(cb)
+	defer restore()
+
+	const identity = "rig-a/session-a"
+	b := createCircuitTestNamedSession(t, env, "asleep")
+
+	// Five healthy wakes. Each one spawns, so none may be quarantined --
+	// the "legitimately drains once is NOT quarantined" half of the
+	// contract, asserted on every iteration rather than only at the end.
+	for i := 0; i < 5; i++ {
+		current, err := env.store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("get bead attempt %d: %v", i+1, err)
+		}
+		if woken := env.reconcile([]beads.Bead{current}); woken != 1 {
+			t.Fatalf("attempt %d: woken = %d, want 1; stderr=%s", i+1, woken, env.stderr.String())
+		}
+		if got := len(rec.quarantinedEvents()); got != 0 {
+			t.Fatalf("attempt %d: quarantine events = %d, want 0 while the breaker is CLOSED", i+1, got)
+		}
+		if err := env.sp.Stop("session-a"); err != nil {
+			t.Fatalf("attempt %d: stop session-a: %v", i+1, err)
+		}
+		env.clk.Advance(6 * time.Minute)
+	}
+
+	current, err := env.store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("get bead before trip: %v", err)
+	}
+	if woken := env.reconcile([]beads.Bead{current}); woken != 0 {
+		t.Fatalf("trip attempt: woken = %d, want 0", woken)
+	}
+
+	quarantined := rec.quarantinedEvents()
+	if len(quarantined) != 1 {
+		t.Fatalf("quarantine events after trip = %d, want exactly 1", len(quarantined))
+	}
+	ev := quarantined[0]
+	if ev.Subject != identity {
+		t.Errorf("event Subject = %q, want the named identity %q", ev.Subject, identity)
+	}
+	if ev.SessionID != b.ID {
+		t.Errorf("event SessionID = %q, want the session bead %q", ev.SessionID, b.ID)
+	}
+	// The message is the operator's only in-stream account of the incident,
+	// so pin the cause (how many restarts, over what window) and the remedy.
+	for _, want := range []string{"CIRCUIT_OPEN", "restarts=6", "30m0s", "gc session reset " + identity} {
+		if !strings.Contains(ev.Message, want) {
+			t.Errorf("event Message = %q, want it to contain %q", ev.Message, want)
+		}
+	}
+
+	// Zero-call invariant: once OPEN, no later tick may spawn or relaunch
+	// the session, and none may re-emit the event. Ticks stay well inside
+	// the 1h auto-reset so the breaker is still OPEN throughout.
+	startsAtTrip := env.sp.CountCalls("Start", "session-a")
+	relaunchesAtTrip := env.sp.CountCalls("Relaunch", "session-a")
+	for i := 0; i < 3; i++ {
+		current, err := env.store.Get(b.ID)
+		if err != nil {
+			t.Fatalf("get bead post-trip tick %d: %v", i+1, err)
+		}
+		if woken := env.reconcile([]beads.Bead{current}); woken != 0 {
+			t.Fatalf("post-trip tick %d: woken = %d, want 0", i+1, woken)
+		}
+		env.clk.Advance(time.Minute)
+	}
+	if got := env.sp.CountCalls("Start", "session-a"); got != startsAtTrip {
+		t.Errorf("Start calls after quarantine = %d, want %d (respawn must stop)", got, startsAtTrip)
+	}
+	if got := env.sp.CountCalls("Relaunch", "session-a"); got != relaunchesAtTrip {
+		t.Errorf("Relaunch calls after quarantine = %d, want %d (respawn must stop)", got, relaunchesAtTrip)
+	}
+	if env.sp.IsRunning("session-a") {
+		t.Error("session-a should not be running after the circuit trips")
+	}
+	if got := len(rec.quarantinedEvents()); got != 1 {
+		t.Errorf("quarantine events after 3 further ticks = %d, want 1 (one event per OPEN incident, not per suppressed respawn)", got)
+	}
+}
+
 func TestReconciler_CircuitStaysClosedWhenAssignedWorkStatusProgresses(t *testing.T) {
 	env := newReconcilerTestEnv()
 	configureAlwaysNamedSession(env)

@@ -2235,6 +2235,18 @@ func (c *capturingRecorder) strandedEvents() []events.Event {
 	return out
 }
 
+// quarantinedEvents returns the captured events.SessionQuarantined events
+// in emission order.
+func (c *capturingRecorder) quarantinedEvents() []events.Event {
+	out := make([]events.Event, 0, len(c.events))
+	for _, e := range c.events {
+		if e.Type == events.SessionQuarantined {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // unknownStateEvents returns the captured events.SessionUnknownState events in
 // emission order.
 func (c *capturingRecorder) unknownStateEvents() []events.Event {
