@@ -253,7 +253,8 @@
             "group": "Internal",
             "pages": [
               "reference/internal/index",
-              "reference/internal/beads-topology"
+              "reference/internal/beads-topology",
+              "reference/internal/bd-resolver"
             ]
           }
         ]

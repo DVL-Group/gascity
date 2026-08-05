@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -64,6 +66,16 @@ func cityAnchoredSessionEnv(cityPath string, workspaceEnv, providerEnv map[strin
 	}
 	for k, v := range anchors {
 		out[k] = v
+	}
+	// Seam B: bias the agent's bare `bd` toward the binary this scope's pin
+	// blessed. A refusal — and an unpinned scope — yield "", which projects
+	// nothing; see PrependBdBinDirToPATH on why an unverified fallback is not
+	// an option. gc's own bd calls are gated independently by the resolver, so
+	// a failure here degrades the agent's convenience, never the fail-closed
+	// contract. This runs BEFORE the gc prepend so the gc binary's directory
+	// keeps its existing guarantee of being PATH's first entry.
+	if bdBin, err := beads.ResolveBdBinaryForScope(context.Background(), cityPath, out); err == nil {
+		processenv.PrependBdBinDirToPATH(out, bdBin)
 	}
 	if gcBin != "" {
 		out["GC_BIN"] = gcBin

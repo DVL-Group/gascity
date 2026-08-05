@@ -16,6 +16,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convergence"
@@ -439,6 +441,16 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		workspaceEnv = p.workspace.Env
 	}
 	env := mergeEnv(passthroughEnv(), expandEnvMap(workspaceEnv), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	// Seam B: bias the agent's bare `bd` toward the binary this scope's pin
+	// blessed, keyed on the agent's own scope (its rig when it has one, else
+	// the city) so a rig pinning a different bd than the city gets that bd.
+	// A refusal — and an unpinned scope — project nothing rather than endorsing
+	// an unverified binary; gc's own bd calls stay gated by the resolver either
+	// way. This runs BEFORE the gc prepend so the gc binary's directory keeps
+	// its existing guarantee of being PATH's first entry.
+	if bdBin, err := beads.ResolveBdBinaryForScope(context.Background(), env["GC_BEADS_SCOPE_ROOT"], env); err == nil {
+		processenv.PrependBdBinDirToPATH(env, bdBin)
+	}
 	processenv.PrependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
